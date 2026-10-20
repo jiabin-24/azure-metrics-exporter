@@ -31,6 +31,8 @@ const (
 var (
 	prometheusMetricNamePattern = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
 	prometheusLabelNamePattern  = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+	promQLStandaloneSelector    = regexp.MustCompile(`^\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\}$`)
+	promQLSelectorMatcher       = regexp.MustCompile(`^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*(=~|!~|!=|=)\s*("(?:\\.|[^"\\])*")\s*`)
 )
 
 type azurePrometheusResponse struct {
@@ -188,7 +190,11 @@ func azurePrometheusQueryURL(endpoint string, requestParams url.Values) (string,
 
 	parsed.Path = "/api/v1/query"
 	params := url.Values{}
-	params.Set("query", requestParams.Get("query"))
+	query, err := expandPromQLMetricList(requestParams.Get("query"))
+	if err != nil {
+		return "", err
+	}
+	params.Set("query", query)
 	rangeQuery := requestParams.Has("start") || requestParams.Has("end") || requestParams.Has("step")
 	if rangeQuery {
 		for _, name := range []string{"start", "end", "step"} {
@@ -201,6 +207,73 @@ func azurePrometheusQueryURL(endpoint string, requestParams url.Values) (string,
 	}
 	parsed.RawQuery = params.Encode()
 	return parsed.String(), nil
+}
+
+func expandPromQLMetricList(query string) (string, error) {
+	selector := strings.TrimSpace(query)
+	// 只展开独立选择器，避免在没有完整 PromQL 语法解析的情况下改变嵌套表达式。
+	if !promQLStandaloneSelector.MatchString(selector) {
+		return query, nil
+	}
+
+	remaining := strings.TrimSpace(selector[1 : len(selector)-1])
+	var matchers []string
+	var metricNames []string
+	nameMatchers := 0
+	for remaining != "" {
+		match := promQLSelectorMatcher.FindStringSubmatch(remaining)
+		if match == nil {
+			return "", errors.New("invalid standalone PromQL selector: expected a label matcher")
+		}
+		if match[1] == "__name__" {
+			nameMatchers++
+			if nameMatchers > 1 {
+				return "", errors.New("standalone PromQL selectors support only one __name__ matcher")
+			}
+			if match[2] == "=~" {
+				value, err := strconv.Unquote(match[3])
+				if err != nil {
+					return "", fmt.Errorf("invalid PromQL metric list string: %w", err)
+				}
+				seen := make(map[string]bool)
+				for _, name := range strings.Split(value, "|") {
+					// 只接受完整指标名的并集，不能把通配符等正则语义误当成字面名称。
+					if !prometheusMetricNamePattern.MatchString(name) {
+						return "", errors.New("PromQL metric name regex compatibility supports only a fixed list such as metric_a|metric_b; wildcards, groups, anchors and empty alternatives are not supported")
+					}
+					if !seen[name] {
+						metricNames = append(metricNames, name)
+						seen[name] = true
+					}
+				}
+			} else {
+				matchers = append(matchers, strings.TrimSpace(match[0]))
+			}
+		} else {
+			matchers = append(matchers, strings.TrimSpace(match[0]))
+		}
+		remaining = remaining[len(match[0]):]
+		if remaining == "" {
+			break
+		}
+		if remaining[0] != ',' {
+			return "", errors.New("invalid standalone PromQL selector: expected a comma between label matchers")
+		}
+		remaining = strings.TrimSpace(remaining[1:])
+	}
+	if len(metricNames) == 0 {
+		return query, nil
+	}
+	suffix := ""
+	if len(matchers) > 0 {
+		suffix = "{" + strings.Join(matchers, ",") + "}"
+	}
+	selectors := make([]string, 0, len(metricNames))
+	for _, name := range metricNames {
+		selectors = append(selectors, name+suffix)
+	}
+	// 普通 or 忽略指标名参与匹配，可能丢弃其他标签相同的不同指标。
+	return strings.Join(selectors, " or on (__name__) "), nil
 }
 
 func formatPromQLResponse(body []byte) (string, error) {

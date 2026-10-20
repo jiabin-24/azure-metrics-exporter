@@ -76,6 +76,25 @@ params:
 
 现有 Azure Metrics 的 `timespan`、`interval`、`aggregation`、`name`、`metric`、`subscription` 等参数不用于此端点。聚合、指标选择和资源筛选应在 PromQL 表达式中指定。Azure Monitor 托管 Prometheus 还要求时序查询包含指标名称选择器，其他限制请参阅[官方 PromQL API 文档](https://learn.microsoft.com/azure/azure-monitor/metrics/prometheus-api-promql#api-limitations)。
 
+### 固定指标名列表兼容
+
+导出器支持将独立选择器中的固定指标名列表转换为 Azure 可接受的显式指标名查询。例如：
+
+```promql
+{__name__=~"etcd_server_has_leader|etcd_server_proposals_pending",cluster="example"}
+```
+
+发送给 Azure 的查询为：
+
+```promql
+etcd_server_has_leader{cluster="example"}
+or on (__name__) etcd_server_proposals_pending{cluster="example"}
+```
+
+其他标签条件原样保留；相同指标名重复出现时只展开一次。即时和范围查询均适用，不额外请求指标名称元数据。`on (__name__)` 防止不同指标因为其他标签相同而被普通 `or` 丢弃。
+
+此兼容仅支持整个查询为独立 `{...}` 选择器、使用双引号 `__name__=~"metric_a|metric_b"` 的形式。列表项必须是完整合法的指标名；通配符、分组、锚点及空分支（例如 `etcd_.+`、`(a|b)`、`^a$`、`a|`）会明确返回 HTTP 400。嵌入 `sum(...)`、`rate(...)` 等表达式、带指标名前缀的选择器及其他写法不做转换，仍由 Azure 校验；这些场景请显式编写各指标查询或拆分 job。本功能不保证上游支持所有多指标表达式，也不改变 Azure 自身的限制。
+
 <a id="aks-control-plane"></a>
 ## AKS 高级控制平面指标
 
@@ -214,7 +233,7 @@ kubectl apply -f .\configmap-controlplane.yaml
 
 注意：
 
-* 第一项只是所需指标的白名单示例，不是采集全部控制平面指标；请先确认这些指标已经入库。多个指标可使用非空的 `__name__` 选择器，或用 `or` 连接有名指标选择器。一个 job 使用一个 `query` 值，不能通过重复 `query` 参数执行多条独立查询；不同聚合应拆分 job。
+* 第一项只是所需指标的白名单示例，不是采集全部控制平面指标；请先确认这些指标已经入库。多指标 job 使用固定指标名列表，由新版导出器展开为显式指标名及 `or on (__name__)`；请先重新编译并重启导出器，再使用此写法，直接提交给 Azure 仍可能报错。`on (__name__)` 按指标名匹配，避免不同指标具有相同其他标签时，被普通 `or` 当作匹配项而丢失右侧指标。一个 job 使用一个 `query` 值，不能通过重复 `query` 参数执行多条独立查询；不同聚合应拆分 job。
 * `workqueue_depth` 可能来自多个组件，诊断时结合返回的上游 `job` 等标签区分。Prometheus 默认遇到标签冲突时会将上游 `job`、`instance` 改为 `exported_job`、`exported_instance`，本地 `job`、`instance` 表示导出器抓取目标。
 * 所有输出都是 gauge。计数器的 `rate()`、直方图的 `histogram_quantile()` 建议在上游查询中计算，不要将本地转发后的数据误当成原生 counter/histogram 再处理。尤其不要对已经导出的 QPS 再调用 `rate()`。
 * 聚合表达式一般没有 `__name__`，因此上例用 `metric_relabel_configs` 将默认名称改成有业务含义的指标名。不要为不同聚合复用同名且同标签的输出。
@@ -227,10 +246,18 @@ kubectl apply -f .\configmap-controlplane.yaml
 以下示例覆盖 etcd 的 leader 状态、提案积压、数据库容量、leader 切换、提案失败和磁盘延迟。指标名遵循 etcd 的 Prometheus 指标定义，**不表示每个 AKS 版本都会暴露全部指标**。请先在目标工作区或导出器 `/query` 页面执行以下即时查询，确认实际可用的指标及标签：
 
 ```promql
-count by (cluster, __name__) ({__name__=~"etcd_.+"})
+count by (cluster, __name__) (
+  etcd_server_has_leader
+  or on (__name__) etcd_server_proposals_pending
+  or on (__name__) etcd_mvcc_db_total_size_in_bytes
+  or on (__name__) etcd_mvcc_db_total_size_in_use_in_bytes
+  or on (__name__) etcd_server_quota_backend_bytes
+)
 ```
 
-`start`、`end`、`step` 留空。此查询按集群列出当前工作区内可查询到的指标及其时序数量；若某项缺失，先检查 `etcd = true`、keep list 和摄取延迟。AKS 未暴露的指标不能通过添加 job 或 keep list 强行开启。
+`start`、`end`、`step` 留空。此查询按集群列出上述五个指标中当前可查询到的指标及其时序数量，并非枚举全部 etcd 指标。验证下方速率和延迟 job 时，可分别查询对应的原始指标名。若某项缺失，先检查 `etcd = true`、keep list 和摄取延迟。AKS 未暴露的指标不能通过添加 job 或 keep list 强行开启。
+
+如需发现工作区中的全部指标名，可直接调用 Azure Prometheus API 的 `/api/v1/label/__name__/values`，再在客户端筛选 `etcd_` 前缀；本导出器的 `/probe/metrics/promql` 不代理该元数据接口。不要使用指标名正则来替代元数据查询。
 
 #### 采集白名单
 
@@ -395,6 +422,7 @@ Invoke-RestMethod $uri
 ```
 
 * **返回空结果**：先在工作区直接执行相同查询。检查 AKS 是否关联了正确工作区、控制平面开关、目标组件、minimal ingestion/keep list、实际集群标签及采集延迟。`up` 存在不代表控制平面指标已经启用；不要用 `or vector(0)` 掩盖缺失数据。
+* **上游 HTTP 501，提示 `Metric name only support equality(=) filter`**：当前 Azure 查询接口不支持所用的指标名正则筛选。新版导出器会展开独立选择器中的固定指标名列表，更新程序需要重新编译并重启；也可以不更新程序，直接使用上述显式指标名加 `or on (__name__)` 的查询。先用单一显式指标名验证，若组合查询也被上游限制，则拆成每个 job 一个显式指标名。这不是未开启控制平面采集的证据。
 * **401/403 或令牌获取错误**：检查导出器实际使用的身份、工作区级角色分配、登录租户以及角色生效时间。导出器可能将上游认证失败作为 HTTP 502 返回，具体原因查看响应正文和日志。
 * **超时**：检查导出器到查询终结点的网络连通性，并协调 `scrape_timeout` 与 `--server.timeout.write`。不要只提高超时，应先缩小查询范围、减少标签维度。
 * **Prometheus 抓取成功但业务指标缺失**：检查返回正文以及本地 `metric_relabel_configs`；空查询结果也可能是成功响应，不能只依赖本地 `up{job="..."}` 判断上游采集正常。
