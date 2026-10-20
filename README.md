@@ -314,6 +314,8 @@ azurerm_ratelimit{scope="subscription",subscriptionID="...",type="read"} 11999
 <a id="promql-query"></a>
 ### `/probe/metrics/promql`（PromQL）
 
+也可以在 `/query` Web UI 的 endpoint 下拉框中选择 `/probe/metrics/promql`，填写 `query` 执行即时查询；范围查询需同时填写 `start`、`end`、`step`。页面会显示查询响应并生成对应的 Prometheus 抓取配置。
+
 此端点将 PromQL 即时或范围查询转发到 Azure Monitor 工作区，并把结果转换为 Prometheus 抓取格式。它适用于通过 Azure Monitor 托管 Prometheus 收集的 AKS 控制平面指标。
 
 设置 Azure Monitor 工作区概述页显示的 Prometheus 查询终结点：
@@ -723,3 +725,53 @@ Microsoft Azure 文档中提供了[支持的指标列表](https://docs.microsoft
 
 azure-metrics-exporter 在 `http://url-to-exporter/query` 提供查询 Web UI，你可以在其中
 测试不同的查询设置和端点。查询 Web UI 还会生成一个 Prometheus `scrape_config` 示例。
+
+## 本地启动（Windows PowerShell）
+
+前置条件：安装 Go（版本满足 `go.mod` 的要求）和 Azure CLI。以下命令在项目根目录执行，订阅 ID 和查询终结点需要替换为自己的值。
+
+```powershell
+# 登录 Azure；如果已登录，可以跳过
+az login
+
+# 选择订阅
+az account set --subscription "<subscription-id>"
+
+# 使用本机 Azure CLI 登录凭据
+$env:AZURE_AUTH = "azcli"
+
+# 从 Azure Monitor 工作区概述页复制 Query endpoint，不要使用数据收集终结点（DCE）
+$env:AZURE_PROMETHEUS_QUERY_ENDPOINT = "https://<workspace>.<region>.prometheus.monitor.azure.com"
+
+# 编译到当前目录
+go build -o azure-metrics-exporter.exe .
+
+# 前台启动，仅监听本机
+.\azure-metrics-exporter.exe --server.bind=127.0.0.1:8080 --server.timeout.write=120s
+```
+
+查询 PromQL 时，登录身份需要在目标 Azure Monitor 工作区上拥有 **Monitoring Data Reader** 角色。查询终结点不要追加 `/api/v1/query` 或 `/api/v1/query_range`，程序会自动选择路径。
+
+也可以在设置好上述环境变量后，直接从源码启动，替代编译和执行两个步骤：
+
+```powershell
+go run . --server.bind=127.0.0.1:8080 --server.timeout.write=120s
+```
+
+启动后，在另一个 PowerShell 窗口中验证：
+
+```powershell
+# 健康检查，预期返回 Ok
+Invoke-RestMethod "http://127.0.0.1:8080/healthz"
+
+# PromQL 即时查询，返回 up 指标的时间序列数量
+Invoke-RestMethod "http://127.0.0.1:8080/probe/metrics/promql?query=count%28up%29"
+
+# 最近 10 分钟的范围查询，步长为 60 秒，每条序列只导出最后一个数据点
+$end = [DateTimeOffset]::UtcNow
+$start = $end.AddMinutes(-10)
+$uri = "http://127.0.0.1:8080/probe/metrics/promql?query=count%28up%29&start=$($start.ToUnixTimeSeconds())&end=$($end.ToUnixTimeSeconds())&step=60"
+Invoke-RestMethod $uri
+```
+
+按 **Ctrl+C** 停止前台进程。如果 8080 端口被占用，可改为 8081，并同步修改验证地址。环境变量仅对当前 PowerShell 会话及其启动的子进程生效，程序不会自动读取 `.env` 文件。修改源码后，使用可执行文件启动时需要重新编译并重启。

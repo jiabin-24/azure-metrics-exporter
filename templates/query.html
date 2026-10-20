@@ -157,11 +157,13 @@
                         <option>/probe/metrics/list</option>
                         <option>/probe/metrics/scrape</option>
                         <option>/probe/metrics/resourcegraph</option>
+                        <option>/probe/metrics/promql</option>
                     </select>
                     <div class="form-text">azure-metrics-exporter query endpoint</div>
                 </div>
             </div>
 
+            <div id="azureMetricsSettings">
             <div class="mb-3 row">
                 <label for="name" class="col-sm-2 col-form-label">name</label>
                 <div class="col-sm-10">
@@ -317,6 +319,44 @@ count</textarea>
                     <div class="form-text">Dimension support: disable server side validation for dimensions</div>
                 </div>
             </div>
+            </div>
+
+            <div class="mb-3 row" query-endpoint="/probe/metrics/promql">
+                <h3>PromQL</h3>
+                <div class="form-text">Uses the configured Azure Monitor workspace query endpoint and Azure identity. Range queries export only the last data point per series.</div>
+            </div>
+
+            <div class="mb-3 row" query-endpoint="/probe/metrics/promql">
+                <label for="query" class="col-sm-2 col-form-label">query</label>
+                <div class="col-sm-10">
+                    <textarea class="form-control" id="query" rows="4" placeholder="count(up)"></textarea>
+                    <div class="form-text">PromQL expression (required). Multiline expressions are supported.</div>
+                </div>
+            </div>
+
+            <div class="mb-3 row" query-endpoint="/probe/metrics/promql">
+                <label for="start" class="col-sm-2 col-form-label">start</label>
+                <div class="col-sm-10">
+                    <input type="text" class="form-control" id="start" placeholder="2026-10-19T12:00:00Z">
+                    <div class="form-text">Range start: RFC3339 or Unix timestamp in seconds. Leave all range fields empty for an instant query.</div>
+                </div>
+            </div>
+
+            <div class="mb-3 row" query-endpoint="/probe/metrics/promql">
+                <label for="end" class="col-sm-2 col-form-label">end</label>
+                <div class="col-sm-10">
+                    <input type="text" class="form-control" id="end" placeholder="2026-10-19T13:00:00Z">
+                    <div class="form-text">Range end: RFC3339 or Unix timestamp in seconds.</div>
+                </div>
+            </div>
+
+            <div class="mb-3 row" query-endpoint="/probe/metrics/promql">
+                <label for="step" class="col-sm-2 col-form-label">step</label>
+                <div class="col-sm-10">
+                    <input type="text" class="form-control" id="step" placeholder="1m">
+                    <div class="form-text">Range step, for example 60 or 1m. Range queries require start, end and step together.</div>
+                </div>
+            </div>
 
             <div class="mb-3 row">
                 <div class="offset-sm-2 col-sm-10">
@@ -412,6 +452,7 @@ count</textarea>
             $("form.query div.row").removeClass("hidden");
             $("form.query div.row[query-endpoint]:not([query-endpoint~=\"" + endpoint + "\"])").addClass("hidden");
             $("form.query div.row[query-endpoint-exclude][query-endpoint-exclude~=\"" + endpoint + "\"]").addClass("hidden");
+            $("#azureMetricsSettings").toggleClass("hidden", endpoint === "/probe/metrics/promql");
         };
 
         let buildPrometheusScrapeConfig = (queryEndpoint, queryParams) => {
@@ -459,6 +500,15 @@ count</textarea>
                     case "endpoint":
                         queryEndpoint = fieldValue;
                         break;
+                    case "query":
+                    case "start":
+                    case "end":
+                    case "step":
+                        if (fieldValue !== "") {
+                            queryParams[fieldName] = fieldValue;
+                            queryParamsForPrometheus[fieldName] = [fieldValue];
+                        }
+                        break;
                     case "metricTop":
                         if (fieldValue !== "") {
                             fieldValue = parseInt(fieldValue)
@@ -480,6 +530,17 @@ count</textarea>
             });
 
             if (queryEndpoint) {
+                if (queryEndpoint === "/probe/metrics/promql") {
+                    if (!queryParams.query) {
+                        alert("PromQL query is required");
+                        return;
+                    }
+                    if ((queryParams.start || queryParams.end || queryParams.step) &&
+                        !(queryParams.start && queryParams.end && queryParams.step)) {
+                        alert("Range queries require start, end and step together");
+                        return;
+                    }
+                }
                 $(".queryResult code").text("");
                 $(".queryResult").addClass("loading");
 
