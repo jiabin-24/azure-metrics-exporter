@@ -24,6 +24,7 @@
     + [/probe/metrics/resource 参数](#probemetricsresource-parameters)
     + [/probe/metrics/list 参数](#probemetricslist-parameters)
     + [/probe/metrics/scrape 参数](#probemetricsscrape-parameters)
+    + [/probe/metrics/promql（PromQL）](#promql-query)
 * [Prometheus 配置示例](#prometheus-configuration-examples)
     * [Redis](#Redis)
     * [VirtualNetworkGateways](#virtualnetworkgateways)
@@ -43,6 +44,7 @@
 - 可通过基于 `$filter` 的 [Azure 资源 API](https://docs.microsoft.com/en-us/rest/api/resources/resources/list)，获取服务发现发现的资源指标（参见 `/probe/metrics/list`）
 - 可通过基于 `$filter` 的 [Azure 资源 API](https://docs.microsoft.com/en-us/rest/api/resources/resources/list) 获取服务发现发现的资源指标，并在 Azure 资源标记中配置相关信息（参见 `/probe/metrics/scrape`）
 - 可通过基于 Kusto 查询的 [Azure Resource Graph API](https://docs.microsoft.com/en-us/azure/governance/resource-graph/overview)，获取服务发现发现的资源指标（参见 `/probe/metrics/resourcegraph`）
+- 可通过 Azure Monitor 工作区的 Prometheus API 查询 PromQL 指标（参见 `/probe/metrics/promql`）
 - 基于 Prometheus 抓取配置或 ServiceMonitor 清单（Prometheus Operator）进行配置
 - 可在抓取配置中处理指标（添加、删除、更新或筛选标签或指标），例如 [`metric_relabel_configs`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#metric_relabel_configs)
 - 完整支持指标[维度](#virtualnetworkgateway-connections-dimension-support)
@@ -75,6 +77,7 @@ Application Options:
       --log.time                                   Show log time [$LOG_TIME]
       --azure-environment=                         Azure environment name (default: AZUREPUBLICCLOUD) [$AZURE_ENVIRONMENT]
       --azure-ad-resource-url=                     Specifies the AAD resource ID to use. If not set, it defaults to ResourceManagerEndpoint for operations with Azure Resource Manager [$AZURE_AD_RESOURCE]
+      --azure.prometheus.query-endpoint=            Azure Monitor workspace Prometheus query endpoint [$AZURE_PROMETHEUS_QUERY_ENDPOINT]
       --azure.servicediscovery.cache=              Duration for caching Azure ServiceDiscovery of workspaces to reduce API calls (time.Duration) (default: 30m) [$AZURE_SERVICEDISCOVERY_CACHE]
       --azure.resource-tag=                        Azure Resource tags (space delimiter) (default: owner) [$AZURE_RESOURCE_TAG]
       --metrics.template=                          Template for metric name (default: {name}) [$METRIC_TEMPLATE]
@@ -306,6 +309,55 @@ azurerm_ratelimit{scope="subscription",subscriptionID="...",type="read"} 11999
 | `/probe/metrics/list`          | 探测资源列表的指标（每个资源查询一次；参见 `azurerm_resource_metric`）                                                                |
 | `/probe/metrics/scrape`        | 探测资源列表的指标，并从资源标记读取配置（每个资源查询一次；参见 `azurerm_resource_metric`）                                          |
 | `/probe/metrics/resourcegraph` | 基于 Kusto 查询和 Resource Graph API 探测资源列表的指标（每个资源查询一次）                                                          |
+| `/probe/metrics/promql`        | 将 PromQL 即时或范围查询转发到 Azure Monitor 工作区，并以 Prometheus 指标格式返回结果                                               |
+
+<a id="promql-query"></a>
+### `/probe/metrics/promql`（PromQL）
+
+此端点将 PromQL 即时或范围查询转发到 Azure Monitor 工作区，并把结果转换为 Prometheus 抓取格式。它适用于通过 Azure Monitor 托管 Prometheus 收集的 AKS 控制平面指标。
+
+设置 Azure Monitor 工作区概述页显示的 Prometheus 查询终结点：
+
+```text
+AZURE_PROMETHEUS_QUERY_ENDPOINT=https://<workspace>.<region>.prometheus.monitor.azure.com
+```
+
+运行导出器所用的 Azure 身份需要在工作区上拥有 **Monitoring Data Reader** 角色。导出器会使用现有 Azure 凭据获取 Prometheus API 所需的令牌。
+
+Prometheus 抓取配置示例：
+
+```yaml
+- job_name: azure-control-plane
+  scrape_interval: 1m
+  metrics_path: /probe/metrics/promql
+  params:
+    query: ["apiserver_request_total"]
+  static_configs:
+  - targets: ["azure-metrics:8080"]
+```
+
+| GET 参数 | 必填 | 描述 |
+|----------|------|------|
+| `query` | 是 | PromQL 表达式 |
+| `start` | 范围查询必填 | 开始时间，支持 RFC3339 时间或 Unix 时间戳（秒） |
+| `end` | 范围查询必填 | 结束时间，格式与 `start` 相同 |
+| `step` | 范围查询必填 | 查询步长，支持秒数或时间长度，例如 `60`、`1m` |
+
+不传 `start`、`end`、`step` 时使用 `/api/v1/query` 即时查询；传入其中任一参数时，必须同时提供三个非空参数，并使用 `/api/v1/query_range` 范围查询。参数格式、时间先后顺序和步长有效性由上游 Prometheus API 校验，错误会返回给调用方。
+
+例如，以下参数查询指定一小时内每分钟计算的 API Server 请求速率：
+
+```yaml
+params:
+  query: ["sum(rate(apiserver_request_total[5m]))"]
+  start: ["2026-10-19T12:00:00Z"]
+  end: ["2026-10-19T13:00:00Z"]
+  step: ["1m"]
+```
+
+与原有 Azure Metrics 导出行为一致，范围查询返回矩阵时，每条时间序列只导出上游返回的最后一个数据点，不输出原始时间戳，也不回填整段历史数据。固定时间范围被重复抓取时，会重复导出该范围的最后一个值；监控当前状态时优先使用即时查询。
+
+查询结果中的 `__name__` 会作为导出的指标名称；如果结果没有指标名（例如聚合表达式），则使用 `azure_promql_query_result`。端点支持数值型即时向量、标量和范围矩阵结果，不支持字符串或原生直方图结果；所有结果以 gauge 导出。现有 Azure Metrics 的 `timespan`、`interval`、`aggregation` 参数不适用于此端点，聚合应在 PromQL 表达式中指定。Azure Monitor 托管 Prometheus 还要求时序查询包含指标名称选择器；其他限制请参阅[官方 PromQL API 文档](https://learn.microsoft.com/azure/azure-monitor/metrics/prometheus-api-promql#api-limitations)。
 
 <a id="probemetrics-parameters"></a>
 ### /probe/metrics 参数
