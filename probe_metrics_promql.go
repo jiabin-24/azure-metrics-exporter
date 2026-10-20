@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	azurePrometheusTokenScope = "https://prometheus.monitor.azure.com/.default"
+	azurePrometheusTokenScope = "https://prometheus.monitor.azure.com/.default" // #nosec G101 -- Public OAuth scope URL, not a credential.
 	promQLResultMetricName    = "azure_promql_query_result"
 	promQLResultHelp          = "Result of a PromQL query against Azure Monitor workspace."
 	maxPromQLResponseSize     = 16 << 20
@@ -145,19 +145,19 @@ func queryAzurePrometheus(
 		return nil, http.StatusBadGateway, fmt.Errorf("failed to acquire Azure Monitor Prometheus token: %w", err)
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL, nil) // #nosec G704 -- Origin is administrator-configured and HTTPS-validated; request parameters only populate the query string.
 	if err != nil {
 		return nil, http.StatusBadRequest, fmt.Errorf("failed to create Azure Monitor PromQL request: %w", err)
 	}
 	request.Header.Set("Authorization", "Bearer "+token.Token)
 	request.Header.Set("Accept", "application/json")
 
-	response, err := client.Do(request)
+	response, err := client.Do(request) // #nosec G704 -- Request targets the administrator-configured origin, not a caller-supplied URL.
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, http.StatusGatewayTimeout, fmt.Errorf("Azure Monitor PromQL request timed out: %w", err)
+			return nil, http.StatusGatewayTimeout, fmt.Errorf("azure monitor PromQL request timed out: %w", err)
 		}
-		return nil, http.StatusBadGateway, fmt.Errorf("Azure Monitor PromQL request failed: %w", err)
+		return nil, http.StatusBadGateway, fmt.Errorf("azure monitor PromQL request failed: %w", err)
 	}
 	defer response.Body.Close()
 
@@ -166,13 +166,13 @@ func queryAzurePrometheus(
 		return nil, http.StatusBadGateway, fmt.Errorf("failed to read Azure Monitor PromQL response: %w", err)
 	}
 	if len(body) > maxPromQLResponseSize {
-		return nil, http.StatusBadGateway, fmt.Errorf("Azure Monitor PromQL response exceeds the %d byte limit", maxPromQLResponseSize)
+		return nil, http.StatusBadGateway, fmt.Errorf("azure monitor PromQL response exceeds the %d byte limit", maxPromQLResponseSize)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		if response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusUnprocessableEntity {
-			return nil, http.StatusBadRequest, fmt.Errorf("Azure Monitor rejected the PromQL query: %s", strings.TrimSpace(string(body)))
+			return nil, http.StatusBadRequest, fmt.Errorf("azure monitor rejected the PromQL query: %s", strings.TrimSpace(string(body)))
 		}
-		return nil, http.StatusBadGateway, fmt.Errorf("Azure Monitor PromQL request returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		return nil, http.StatusBadGateway, fmt.Errorf("azure monitor PromQL request returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	return body, http.StatusOK, nil
@@ -185,7 +185,7 @@ func azurePrometheusQueryURL(endpoint string, requestParams url.Values) (string,
 	}
 	if parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
 		(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", errors.New("Azure Monitor workspace Prometheus query endpoint must be an HTTPS origin URL")
+		return "", errors.New("azure monitor workspace Prometheus query endpoint must be an HTTPS origin URL")
 	}
 
 	parsed.Path = "/api/v1/query"
