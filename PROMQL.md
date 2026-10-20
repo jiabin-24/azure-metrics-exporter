@@ -193,6 +193,11 @@ kubectl apply -f .\configmap-controlplane.yaml
     - '{__name__=~"apiserver_current_inflight_requests|etcd_server_has_leader|scheduler_pending_pods|workqueue_depth|cluster_autoscaler_unschedulable_pods_count"}'
   static_configs:
   - targets: ["azure-metrics:8080"]
+  metric_relabel_configs:
+  - source_labels: [__name__]
+    target_label: metric
+  - target_label: __name__
+    replacement: azure_aks_control_plane
 
 - job_name: azure-aks-apiserver-request-rate
   scrape_interval: 1m
@@ -227,12 +232,13 @@ kubectl apply -f .\configmap-controlplane.yaml
 
 | job | 用途 | 本地导出指标 |
 |-----|------|--------------|
-| `azure-aks-control-plane-selected` | 选取 API Server 并发请求、etcd leader 状态、待调度 Pod、控制器队列深度及不可调度 Pod 数 | 保留上游原始指标名和标签 |
+| `azure-aks-control-plane-selected` | 选取 API Server 并发请求、etcd leader 状态、待调度 Pod、控制器队列深度及不可调度 Pod 数 | `azure_aks_control_plane`，原始指标名保存在 `metric` 标签 |
 | `azure-aks-apiserver-request-rate` | 按集群和 HTTP 状态码统计最近 5 分钟平均 QPS | `azure_aks_apiserver_requests_per_second` |
 | `azure-aks-apiserver-latency-p99` | 排除长连接请求后，统计集群级最近 5 分钟请求延迟 P99（秒） | `azure_aks_apiserver_request_duration_seconds_p99` |
 
 注意：
 
+* 多指标 job 先将原始 `__name__` 保存到 `metric` 标签，再统一重命名；不要颠倒这两条 relabel 规则。Grafana 中先选择 `azure_aks_control_plane`，再通过 `metric` 标签下拉框选择原始指标，例如 `azure_aks_control_plane{metric="apiserver_current_inflight_requests"}`。这由 Prometheus 抓取后的 relabel 实现，不需要添加不生效的 `params.name`。规则会覆盖已有的 `metric` 标签，使用前请确认上游没有需要保留的同名标签。不同原始指标的含义和单位可能不同，应按 `metric` 筛选后展示或计算，不能直接求和。
 * 第一项只是所需指标的白名单示例，不是采集全部控制平面指标；请先确认这些指标已经入库。多指标 job 使用固定指标名列表，由新版导出器展开为显式指标名及 `or on (__name__)`；请先重新编译并重启导出器，再使用此写法，直接提交给 Azure 仍可能报错。`on (__name__)` 按指标名匹配，避免不同指标具有相同其他标签时，被普通 `or` 当作匹配项而丢失右侧指标。一个 job 使用一个 `query` 值，不能通过重复 `query` 参数执行多条独立查询；不同聚合应拆分 job。
 * `workqueue_depth` 可能来自多个组件，诊断时结合返回的上游 `job` 等标签区分。Prometheus 默认遇到标签冲突时会将上游 `job`、`instance` 改为 `exported_job`、`exported_instance`，本地 `job`、`instance` 表示导出器抓取目标。
 * 所有输出都是 gauge。计数器的 `rate()`、直方图的 `histogram_quantile()` 建议在上游查询中计算，不要将本地转发后的数据误当成原生 counter/histogram 再处理。尤其不要对已经导出的 QPS 再调用 `rate()`。
@@ -284,6 +290,11 @@ count by (cluster, __name__) (
     - '{__name__=~"etcd_server_has_leader|etcd_server_proposals_pending|etcd_mvcc_db_total_size_in_bytes|etcd_mvcc_db_total_size_in_use_in_bytes|etcd_server_quota_backend_bytes"}'
   static_configs:
   - targets: ["azure-metrics:8080"]
+  metric_relabel_configs:
+  - source_labels: [__name__]
+    target_label: metric
+  - target_label: __name__
+    replacement: azure_aks_etcd_health_capacity
 
 - job_name: azure-aks-etcd-leader-changes
   scrape_interval: 1m
@@ -347,6 +358,14 @@ count by (cluster, __name__) (
 ```
 
 #### 结果解读
+
+`azure-aks-etcd-health-capacity` 同样使用统一名称加原始指标标签：Grafana 的 Metric 选择 `azure_aks_etcd_health_capacity`，Label filters 选择 `metric`，即可在下拉框中选择已采集到的原始指标。例如：
+
+```promql
+azure_aks_etcd_health_capacity{metric="etcd_server_has_leader"}
+```
+
+下表前五项是 `metric` 标签中的原始指标名，不再是该 job 在本地 Prometheus 中的指标名称。`/query` 页面直接访问导出器时仍显示原始名称，因为 relabel 只在 Prometheus 抓取入库时执行；修改配置后需重新加载 Prometheus，并等待下一次成功抓取。
 
 | 指标或 job | 含义与关注点 |
 |-----------|--------------|
