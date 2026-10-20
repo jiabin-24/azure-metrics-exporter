@@ -24,13 +24,15 @@
     + [/probe/metrics/resource 参数](#probemetricsresource-parameters)
     + [/probe/metrics/list 参数](#probemetricslist-parameters)
     + [/probe/metrics/scrape 参数](#probemetricsscrape-parameters)
-    + [/probe/metrics/promql（PromQL）](#promql-query)
+    + [/probe/metrics/promql（PromQL）](PROMQL.md)
 * [Prometheus 配置示例](#prometheus-configuration-examples)
     * [Redis](#Redis)
     * [VirtualNetworkGateways](#virtualnetworkgateways)
     * [虚拟网络网关连接（支持维度）](#virtualnetworkgateway-connections-dimension-support)
     * [StorageAccount（支持指标命名空间和维度）](#storageaccount-metric-namespace-and-dimension-support)
+    * [AKS 高级控制平面指标](PROMQL.md#aks-control-plane)
 * [开发和测试查询 Web UI](#development-and-testing-query-webui)
+* [PromQL 查询与本地启动](PROMQL.md)
 
 <a id="Features"></a>
 ## 功能
@@ -44,7 +46,7 @@
 - 可通过基于 `$filter` 的 [Azure 资源 API](https://docs.microsoft.com/en-us/rest/api/resources/resources/list)，获取服务发现发现的资源指标（参见 `/probe/metrics/list`）
 - 可通过基于 `$filter` 的 [Azure 资源 API](https://docs.microsoft.com/en-us/rest/api/resources/resources/list) 获取服务发现发现的资源指标，并在 Azure 资源标记中配置相关信息（参见 `/probe/metrics/scrape`）
 - 可通过基于 Kusto 查询的 [Azure Resource Graph API](https://docs.microsoft.com/en-us/azure/governance/resource-graph/overview)，获取服务发现发现的资源指标（参见 `/probe/metrics/resourcegraph`）
-- 可通过 Azure Monitor 工作区的 Prometheus API 查询 PromQL 指标（参见 `/probe/metrics/promql`）
+- 可通过 Azure Monitor 工作区的 Prometheus API 查询 PromQL 指标（参见 [PromQL 查询与 AKS 控制平面指标](PROMQL.md)）
 - 基于 Prometheus 抓取配置或 ServiceMonitor 清单（Prometheus Operator）进行配置
 - 可在抓取配置中处理指标（添加、删除、更新或筛选标签或指标），例如 [`metric_relabel_configs`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#metric_relabel_configs)
 - 完整支持指标[维度](#virtualnetworkgateway-connections-dimension-support)
@@ -314,52 +316,7 @@ azurerm_ratelimit{scope="subscription",subscriptionID="...",type="read"} 11999
 <a id="promql-query"></a>
 ### `/probe/metrics/promql`（PromQL）
 
-也可以在 `/query` Web UI 的 endpoint 下拉框中选择 `/probe/metrics/promql`，填写 `query` 执行即时查询；范围查询需同时填写 `start`、`end`、`step`。页面会显示查询响应并生成对应的 Prometheus 抓取配置。
-
-此端点将 PromQL 即时或范围查询转发到 Azure Monitor 工作区，并把结果转换为 Prometheus 抓取格式。它适用于通过 Azure Monitor 托管 Prometheus 收集的 AKS 控制平面指标。
-
-设置 Azure Monitor 工作区概述页显示的 Prometheus 查询终结点：
-
-```text
-AZURE_PROMETHEUS_QUERY_ENDPOINT=https://<workspace>.<region>.prometheus.monitor.azure.com
-```
-
-运行导出器所用的 Azure 身份需要在工作区上拥有 **Monitoring Data Reader** 角色。导出器会使用现有 Azure 凭据获取 Prometheus API 所需的令牌。
-
-Prometheus 抓取配置示例：
-
-```yaml
-- job_name: azure-control-plane
-  scrape_interval: 1m
-  metrics_path: /probe/metrics/promql
-  params:
-    query: ["apiserver_request_total"]
-  static_configs:
-  - targets: ["azure-metrics:8080"]
-```
-
-| GET 参数 | 必填 | 描述 |
-|----------|------|------|
-| `query` | 是 | PromQL 表达式 |
-| `start` | 范围查询必填 | 开始时间，支持 RFC3339 时间或 Unix 时间戳（秒） |
-| `end` | 范围查询必填 | 结束时间，格式与 `start` 相同 |
-| `step` | 范围查询必填 | 查询步长，支持秒数或时间长度，例如 `60`、`1m` |
-
-不传 `start`、`end`、`step` 时使用 `/api/v1/query` 即时查询；传入其中任一参数时，必须同时提供三个非空参数，并使用 `/api/v1/query_range` 范围查询。参数格式、时间先后顺序和步长有效性由上游 Prometheus API 校验，错误会返回给调用方。
-
-例如，以下参数查询指定一小时内每分钟计算的 API Server 请求速率：
-
-```yaml
-params:
-  query: ["sum(rate(apiserver_request_total[5m]))"]
-  start: ["2026-10-19T12:00:00Z"]
-  end: ["2026-10-19T13:00:00Z"]
-  step: ["1m"]
-```
-
-与原有 Azure Metrics 导出行为一致，范围查询返回矩阵时，每条时间序列只导出上游返回的最后一个数据点，不输出原始时间戳，也不回填整段历史数据。固定时间范围被重复抓取时，会重复导出该范围的最后一个值；监控当前状态时优先使用即时查询。
-
-查询结果中的 `__name__` 会作为导出的指标名称；如果结果没有指标名（例如聚合表达式），则使用 `azure_promql_query_result`。端点支持数值型即时向量、标量和范围矩阵结果，不支持字符串或原生直方图结果；所有结果以 gauge 导出。现有 Azure Metrics 的 `timespan`、`interval`、`aggregation` 参数不适用于此端点，聚合应在 PromQL 表达式中指定。Azure Monitor 托管 Prometheus 还要求时序查询包含指标名称选择器；其他限制请参阅[官方 PromQL API 文档](https://learn.microsoft.com/azure/azure-monitor/metrics/prometheus-api-promql#api-limitations)。
+参数、身份权限、即时/范围查询、本地启动及 AKS 高级控制平面指标的 job 配置已移至独立文档：[PromQL 查询与 AKS 控制平面指标](PROMQL.md)。
 
 <a id="probemetrics-parameters"></a>
 ### /probe/metrics 参数
@@ -726,52 +683,4 @@ Microsoft Azure 文档中提供了[支持的指标列表](https://docs.microsoft
 azure-metrics-exporter 在 `http://url-to-exporter/query` 提供查询 Web UI，你可以在其中
 测试不同的查询设置和端点。查询 Web UI 还会生成一个 Prometheus `scrape_config` 示例。
 
-## 本地启动（Windows PowerShell）
-
-前置条件：安装 Go（版本满足 `go.mod` 的要求）和 Azure CLI。以下命令在项目根目录执行，订阅 ID 和查询终结点需要替换为自己的值。
-
-```powershell
-# 登录 Azure；如果已登录，可以跳过
-az login
-
-# 选择订阅
-az account set --subscription "<subscription-id>"
-
-# 使用本机 Azure CLI 登录凭据
-$env:AZURE_AUTH = "azcli"
-
-# 从 Azure Monitor 工作区概述页复制 Query endpoint，不要使用数据收集终结点（DCE）
-$env:AZURE_PROMETHEUS_QUERY_ENDPOINT = "https://<workspace>.<region>.prometheus.monitor.azure.com"
-
-# 编译到当前目录
-go build -o azure-metrics-exporter.exe .
-
-# 前台启动，仅监听本机
-.\azure-metrics-exporter.exe --server.bind=127.0.0.1:8080 --server.timeout.write=120s
-```
-
-查询 PromQL 时，登录身份需要在目标 Azure Monitor 工作区上拥有 **Monitoring Data Reader** 角色。查询终结点不要追加 `/api/v1/query` 或 `/api/v1/query_range`，程序会自动选择路径。
-
-也可以在设置好上述环境变量后，直接从源码启动，替代编译和执行两个步骤：
-
-```powershell
-go run . --server.bind=127.0.0.1:8080 --server.timeout.write=120s
-```
-
-启动后，在另一个 PowerShell 窗口中验证：
-
-```powershell
-# 健康检查，预期返回 Ok
-Invoke-RestMethod "http://127.0.0.1:8080/healthz"
-
-# PromQL 即时查询，返回 up 指标的时间序列数量
-Invoke-RestMethod "http://127.0.0.1:8080/probe/metrics/promql?query=count%28up%29"
-
-# 最近 10 分钟的范围查询，步长为 60 秒，每条序列只导出最后一个数据点
-$end = [DateTimeOffset]::UtcNow
-$start = $end.AddMinutes(-10)
-$uri = "http://127.0.0.1:8080/probe/metrics/promql?query=count%28up%29&start=$($start.ToUnixTimeSeconds())&end=$($end.ToUnixTimeSeconds())&step=60"
-Invoke-RestMethod $uri
-```
-
-按 **Ctrl+C** 停止前台进程。如果 8080 端口被占用，可改为 8081，并同步修改验证地址。环境变量仅对当前 PowerShell 会话及其启动的子进程生效，程序不会自动读取 `.env` 文件。修改源码后，使用可执行文件启动时需要重新编译并重启。
+本地启动及验证命令请参阅 [Windows PowerShell 本地启动](PROMQL.md#local-startup)。

@@ -1,0 +1,410 @@
+# PromQL 查询与 AKS 控制平面指标
+
+[返回 README](README.md)
+
+本项目的 `/probe/metrics/promql` 端点将 PromQL 即时或范围查询转发到 Azure Monitor 工作区，并把结果转换为 Prometheus 抓取格式。它适用于通过 Azure Monitor 托管 Prometheus 收集的 AKS 控制平面指标。
+
+目录：
+
+* [查询终结点与权限](#endpoint-and-auth)
+* [查询参数与结果](#query-parameters)
+* [AKS 高级控制平面指标](#aks-control-plane)
+    * [etcd 专项指标与 job](#etcd-metrics)
+* [Windows PowerShell 本地启动](#local-startup)
+* [验证与排查](#verification)
+* [官方参考](#references)
+
+<a id="endpoint-and-auth"></a>
+## 查询终结点与权限
+
+从 **Azure Monitor 工作区**概述页复制 Prometheus 查询终结点，设置：
+
+```text
+AZURE_PROMETHEUS_QUERY_ENDPOINT=https://<workspace>.<region>.prometheus.monitor.azure.com
+```
+
+不要使用 Log Analytics 工作区地址或数据收集终结点（DCE），也不要追加 `/api/v1/query` 或 `/api/v1/query_range`，程序会自动选择路径。
+
+运行导出器所用的 Azure 身份需要在目标 Azure Monitor 工作区上拥有 **Monitoring Data Reader** 角色。导出器会使用现有 Azure 凭据获取 Prometheus API 所需的令牌，无需在 Prometheus job 中配置 Azure 令牌。身份验证方式参见 [README 配置](README.md#configuration)；本地 Azure CLI 登录方式见下方示例。
+
+一个导出器进程使用一个查询终结点。若多个 AKS 集群写入同一工作区，可以通过 PromQL 标签筛选；若要查询不同工作区，应分别部署导出器并设置对应的终结点，job 的 `targets` 指向相应实例。
+
+最小抓取示例（放入 Prometheus 的 `scrape_configs`）：
+
+```yaml
+- job_name: azure-control-plane
+  scrape_interval: 1m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/promql
+  params:
+    query: ["apiserver_request_total"]
+  static_configs:
+  - targets: ["azure-metrics:8080"]
+```
+
+`azure-metrics:8080` 是导出器地址，不是 AKS API Server 或工作区地址。使用上述 `30s` 抓取超时时，导出器应设置 `--server.timeout.write=120s`，避免默认 `10s` 写超时提前结束请求；也可根据实际延迟协调调小查询和抓取超时。`scrape_timeout` 不得大于 `scrape_interval`。
+
+<a id="query-parameters"></a>
+## 查询参数与结果
+
+也可以在 `/query` Web UI 的 endpoint 下拉框中选择 `/probe/metrics/promql`，填写 `query` 执行即时查询；范围查询需同时填写 `start`、`end`、`step`。页面会显示查询响应并生成对应的 Prometheus 抓取配置。
+
+| GET 参数 | 必填 | 描述 |
+|----------|------|------|
+| `query` | 是 | PromQL 表达式 |
+| `start` | 范围查询必填 | 开始时间，支持 RFC3339 时间或 Unix 时间戳（秒） |
+| `end` | 范围查询必填 | 结束时间，格式与 `start` 相同 |
+| `step` | 范围查询必填 | 查询步长，支持秒数或时间长度，例如 `60`、`1m` |
+
+不传 `start`、`end`、`step` 时使用 `/api/v1/query` 即时查询；传入其中任一参数时，必须同时提供三个非空参数，并使用 `/api/v1/query_range` 范围查询。参数格式、时间先后顺序和步长有效性由上游 Prometheus API 校验，错误会返回给调用方。
+
+例如，以下参数查询指定一小时内每分钟计算的 API Server 请求速率：
+
+```yaml
+params:
+  query: ["sum(rate(apiserver_request_total[5m]))"]
+  start: ["2026-10-19T12:00:00Z"]
+  end: ["2026-10-19T13:00:00Z"]
+  step: ["1m"]
+```
+
+与原有 Azure Metrics 导出行为一致，范围查询返回矩阵时，每条时间序列只导出上游返回的最后一个数据点，不输出原始时间戳，也不回填整段历史数据。固定时间范围被重复抓取时，会重复导出该范围的最后一个值；监控当前状态时优先使用即时查询。
+
+查询结果中的 `__name__` 会作为导出的指标名称；如果结果没有指标名（例如聚合表达式），则使用 `azure_promql_query_result`。端点支持数值型即时向量、标量和范围矩阵结果，不支持字符串或原生直方图结果；所有结果以 gauge 导出。
+
+为兼容传统 Prometheus 文本格式，上游标签名中的非 ASCII 字母、数字、下划线字符会逐个替换为 `_`，例如 `microsoft.resourceid` 导出为 `microsoft_resourceid`。数字开头的名称会加 `_` 前缀，空名称转换为 `_`；合法名称和标签值保持不变。若同一时间序列中两个标签转换后重名（例如同时包含 `microsoft.resourceid` 和 `microsoft_resourceid`），或转换后名称为保留的 `__name__`，查询会明确报错，不会覆盖或丢弃标签。此规则适用于即时和范围查询，不改变指标名称的校验。
+
+现有 Azure Metrics 的 `timespan`、`interval`、`aggregation`、`name`、`metric`、`subscription` 等参数不用于此端点。聚合、指标选择和资源筛选应在 PromQL 表达式中指定。Azure Monitor 托管 Prometheus 还要求时序查询包含指标名称选择器，其他限制请参阅[官方 PromQL API 文档](https://learn.microsoft.com/azure/azure-monitor/metrics/prometheus-api-promql#api-limitations)。
+
+<a id="aks-control-plane"></a>
+## AKS 高级控制平面指标
+
+### 1. 区分平台指标与高级控制平面指标
+
+AKS 默认提供的部分 Azure Monitor 平台指标，可以通过原有 `/probe/metrics` 或 `/probe/metrics/resource` 等端点读取。API Server、etcd、Scheduler、Controller Manager、Cluster Autoscaler 的详细 Prometheus 指标，则需要走以下链路：
+
+```text
+AKS 控制平面 -> Azure Monitor 托管 Prometheus -> Azure Monitor 工作区
+                                                        |
+                                                 PromQL 查询 API
+                                                        |
+                                              azure-metrics-exporter
+                                                        |
+                                            自建 Prometheus scrape job
+```
+
+仅添加导出器 job 不会开启 AKS 侧的采集，也不能通过 Azure Metrics 的 `metricNamespace` 切换出这些指标。本项目是查询转发端，不会直接抓取托管控制平面内部的 `/metrics`。
+
+### 2. 在 AKS 侧启用采集
+
+前提：AKS 使用托管身份，且已启用 Azure Monitor 托管 Prometheus 并关联目标 Azure Monitor 工作区。当前官方控制平面指标文档列明该功能不支持 Azure Private Link；部署前应确认适用区域、网络和服务限制。
+
+已有托管 Prometheus 的集群，执行：
+
+```powershell
+az aks update --resource-group "<aks-resource-group>" --name "<aks-name>" --enable-control-plane-metrics
+```
+
+若尚未启用托管 Prometheus，可先关联工作区，再启用控制平面指标：
+
+```powershell
+az aks update --resource-group "<aks-resource-group>" --name "<aks-name>" --enable-azure-monitor-metrics --azure-monitor-workspace-resource-id "<azure-monitor-workspace-resource-id>"
+az aks update --resource-group "<aks-resource-group>" --name "<aks-name>" --enable-control-plane-metrics
+```
+
+以上命令会修改集群配置，应由具备相应权限的管理员执行。采集启用后，等待数分钟，再在目标工作区查询确认。
+
+### 3. 启用额外组件与指标
+
+默认控制平面目标为 `apiserver` 和 `etcd`，且默认启用最小摄取配置（minimal ingestion profile）。Scheduler、Controller Manager 和 Cluster Autoscaler 需要显式启用；仅修改 Prometheus job 的查询不会让缺失的指标自动入库。
+
+使用官方 [ama-metrics-settings-configmap.yaml 模板](https://github.com/Azure/prometheus-collector/blob/main/otelcollector/configmaps/ama-metrics-settings-configmap.yaml)。以下为 **schema v2** 的相关配置示例，展示如何采集所选组件的全部可用指标：
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ama-metrics-settings-configmap
+  namespace: kube-system
+data:
+  schema-version: v2
+  config-version: ver1
+  controlplane-metrics: |-
+    default-targets-scrape-enabled: |-
+      apiserver = true
+      etcd = true
+      kube-scheduler = true
+      kube-controller-manager = true
+      cluster-autoscaler = true
+    minimal-ingestion-profile: |-
+      enabled = false
+```
+
+如果集群已有此 ConfigMap，请将上述 `controlplane-metrics` 内容合并到现有配置，保留其他设置（例如 `cluster-metrics`、集群别名和已有 keep list），不要直接覆盖整个 ConfigMap。旧 schema v1 应按官方文档迁移到 v2，不要混用旧的 `controlplane-*` 键名。
+
+将合并后的完整配置保存为 `configmap-controlplane.yaml`，再应用到正确的集群上下文：
+
+```powershell
+kubectl config current-context
+kubectl apply -f .\configmap-controlplane.yaml
+```
+
+关闭 minimal ingestion 且没有目标 keep list 时，会摄取所选目标的全部可用指标，可能显著增加时序数量和费用。生产环境通常建议保持 `enabled = true`，并在 `controlplane-metrics` 内追加按目标划分的 keep list，只补充所需指标。例如为 API Server 增补请求计数和经典直方图：
+
+```yaml
+    default-targets-metrics-keep-list: |-
+      apiserver = "apiserver_request_total|apiserver_request_duration_seconds_bucket|apiserver_request_duration_seconds_sum|apiserver_request_duration_seconds_count"
+```
+
+此片段应与上面的 `minimal-ingestion-profile` 同级；修改已有 keep list 时应合并指标，而不是删除原有条目。经典直方图需保留整个 `_bucket`、`_sum`、`_count` 家族，不能只配置不带后缀的基名。其他目标按同样方式配置 `etcd`、`kube-scheduler`、`kube-controller-manager` 或 `cluster-autoscaler`。实际可用指标取决于 AKS/Kubernetes 版本和已启用功能，例如未使用 Cluster Autoscaler 的集群不能依靠打开采集开关产生其业务指标。
+
+### 4. 配置导出器与 Prometheus job
+
+按[查询终结点与权限](#endpoint-and-auth)配置导出器。下例不限定集群，查询当前工作区内所有已有对应指标的集群；聚合表达式保留 `cluster` 分组，分别输出各集群的结果。请确认上游存在能区分集群的 `cluster` 标签，且不同集群未使用相同别名，避免聚合时混合数据。此处不跨工作区，也不会自动启用尚未配置的 AKS 侧采集。
+
+以下可直接作为 `scrape_configs` 的列表项使用，无需配置 `start`、`end`、`step`：
+
+```yaml
+- job_name: azure-aks-control-plane-selected
+  scrape_interval: 1m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/promql
+  params:
+    query:
+    - '{__name__=~"apiserver_current_inflight_requests|etcd_server_has_leader|scheduler_pending_pods|workqueue_depth|cluster_autoscaler_unschedulable_pods_count"}'
+  static_configs:
+  - targets: ["azure-metrics:8080"]
+
+- job_name: azure-aks-apiserver-request-rate
+  scrape_interval: 1m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/promql
+  params:
+    query:
+    - 'sum by (cluster, code) (rate(apiserver_request_total[5m]))'
+  static_configs:
+  - targets: ["azure-metrics:8080"]
+  metric_relabel_configs:
+  - source_labels: [__name__]
+    regex: azure_promql_query_result
+    target_label: __name__
+    replacement: azure_aks_apiserver_requests_per_second
+
+- job_name: azure-aks-apiserver-latency-p99
+  scrape_interval: 1m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/promql
+  params:
+    query:
+    - 'histogram_quantile(0.99, sum by (cluster, le) (rate(apiserver_request_duration_seconds_bucket{verb!~"WATCH|WATCHLIST|CONNECT"}[5m])))'
+  static_configs:
+  - targets: ["azure-metrics:8080"]
+  metric_relabel_configs:
+  - source_labels: [__name__]
+    regex: azure_promql_query_result
+    target_label: __name__
+    replacement: azure_aks_apiserver_request_duration_seconds_p99
+```
+
+| job | 用途 | 本地导出指标 |
+|-----|------|--------------|
+| `azure-aks-control-plane-selected` | 选取 API Server 并发请求、etcd leader 状态、待调度 Pod、控制器队列深度及不可调度 Pod 数 | 保留上游原始指标名和标签 |
+| `azure-aks-apiserver-request-rate` | 按集群和 HTTP 状态码统计最近 5 分钟平均 QPS | `azure_aks_apiserver_requests_per_second` |
+| `azure-aks-apiserver-latency-p99` | 排除长连接请求后，统计集群级最近 5 分钟请求延迟 P99（秒） | `azure_aks_apiserver_request_duration_seconds_p99` |
+
+注意：
+
+* 第一项只是所需指标的白名单示例，不是采集全部控制平面指标；请先确认这些指标已经入库。多个指标可使用非空的 `__name__` 选择器，或用 `or` 连接有名指标选择器。一个 job 使用一个 `query` 值，不能通过重复 `query` 参数执行多条独立查询；不同聚合应拆分 job。
+* `workqueue_depth` 可能来自多个组件，诊断时结合返回的上游 `job` 等标签区分。Prometheus 默认遇到标签冲突时会将上游 `job`、`instance` 改为 `exported_job`、`exported_instance`，本地 `job`、`instance` 表示导出器抓取目标。
+* 所有输出都是 gauge。计数器的 `rate()`、直方图的 `histogram_quantile()` 建议在上游查询中计算，不要将本地转发后的数据误当成原生 counter/histogram 再处理。尤其不要对已经导出的 QPS 再调用 `rate()`。
+* 聚合表达式一般没有 `__name__`，因此上例用 `metric_relabel_configs` 将默认名称改成有业务含义的指标名。不要为不同聚合复用同名且同标签的输出。
+* 尽量先在上游按所需维度聚合，避免一次导出全部 API 请求标签或所有 histogram bucket。导出器单次上游响应上限为 16 MiB，过大的查询会失败。
+* 抓取周期不是 AKS 侧采集周期。提高本地抓取频率不会提高上游数据的刷新速度；最近 5 分钟的速率查询还需要该窗口内有足够样本。
+
+<a id="etcd-metrics"></a>
+### 5. etcd 专项指标与 job
+
+以下示例覆盖 etcd 的 leader 状态、提案积压、数据库容量、leader 切换、提案失败和磁盘延迟。指标名遵循 etcd 的 Prometheus 指标定义，**不表示每个 AKS 版本都会暴露全部指标**。请先在目标工作区或导出器 `/query` 页面执行以下即时查询，确认实际可用的指标及标签：
+
+```promql
+count by (cluster, __name__) ({__name__=~"etcd_.+"})
+```
+
+`start`、`end`、`step` 留空。此查询按集群列出当前工作区内可查询到的指标及其时序数量；若某项缺失，先检查 `etcd = true`、keep list 和摄取延迟。AKS 未暴露的指标不能通过添加 job 或 keep list 强行开启。
+
+#### 采集白名单
+
+若保持 minimal ingestion 开启，将下列 `etcd` 配置合并到前述 `controlplane-metrics.default-targets-metrics-keep-list` 中，与已有的 `apiserver` 等条目并列：
+
+```yaml
+    default-targets-metrics-keep-list: |-
+      etcd = "etcd_server_has_leader|etcd_server_proposals_pending|etcd_mvcc_db_total_size_in_bytes|etcd_mvcc_db_total_size_in_use_in_bytes|etcd_server_quota_backend_bytes|etcd_server_leader_changes_seen_total|etcd_server_proposals_failed_total|etcd_disk_wal_fsync_duration_seconds_bucket|etcd_disk_wal_fsync_duration_seconds_sum|etcd_disk_wal_fsync_duration_seconds_count|etcd_disk_backend_commit_duration_seconds_bucket|etcd_disk_backend_commit_duration_seconds_sum|etcd_disk_backend_commit_duration_seconds_count"
+```
+
+不要为这段示例重复创建 `default-targets-metrics-keep-list` 键，也不要覆盖已有白名单。已关闭 minimal ingestion 且未设置 etcd keep list 时，无需再添加此白名单。
+
+#### Prometheus job
+
+将以下列表项追加到 `scrape_configs`，导出器地址、工作区权限和超时设置与前述示例一致：
+
+```yaml
+- job_name: azure-aks-etcd-health-capacity
+  scrape_interval: 1m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/promql
+  params:
+    query:
+    - '{__name__=~"etcd_server_has_leader|etcd_server_proposals_pending|etcd_mvcc_db_total_size_in_bytes|etcd_mvcc_db_total_size_in_use_in_bytes|etcd_server_quota_backend_bytes"}'
+  static_configs:
+  - targets: ["azure-metrics:8080"]
+
+- job_name: azure-aks-etcd-leader-changes
+  scrape_interval: 1m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/promql
+  params:
+    query:
+    - 'max by (cluster) (increase(etcd_server_leader_changes_seen_total[15m]))'
+  static_configs:
+  - targets: ["azure-metrics:8080"]
+  metric_relabel_configs:
+  - source_labels: [__name__]
+    regex: azure_promql_query_result
+    target_label: __name__
+    replacement: azure_aks_etcd_leader_changes_15m
+
+- job_name: azure-aks-etcd-proposals-failed
+  scrape_interval: 1m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/promql
+  params:
+    query:
+    - 'max by (cluster) (rate(etcd_server_proposals_failed_total[5m]))'
+  static_configs:
+  - targets: ["azure-metrics:8080"]
+  metric_relabel_configs:
+  - source_labels: [__name__]
+    regex: azure_promql_query_result
+    target_label: __name__
+    replacement: azure_aks_etcd_proposals_failed_per_second
+
+- job_name: azure-aks-etcd-wal-fsync-p99
+  scrape_interval: 1m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/promql
+  params:
+    query:
+    - 'max by (cluster) (histogram_quantile(0.99, sum by (cluster, instance, le) (rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m]))))'
+  static_configs:
+  - targets: ["azure-metrics:8080"]
+  metric_relabel_configs:
+  - source_labels: [__name__]
+    regex: azure_promql_query_result
+    target_label: __name__
+    replacement: azure_aks_etcd_wal_fsync_duration_seconds_p99_max
+
+- job_name: azure-aks-etcd-backend-commit-p99
+  scrape_interval: 1m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/promql
+  params:
+    query:
+    - 'max by (cluster) (histogram_quantile(0.99, sum by (cluster, instance, le) (rate(etcd_disk_backend_commit_duration_seconds_bucket[5m]))))'
+  static_configs:
+  - targets: ["azure-metrics:8080"]
+  metric_relabel_configs:
+  - source_labels: [__name__]
+    regex: azure_promql_query_result
+    target_label: __name__
+    replacement: azure_aks_etcd_backend_commit_duration_seconds_p99_max
+```
+
+#### 结果解读
+
+| 指标或 job | 含义与关注点 |
+|-----------|--------------|
+| `etcd_server_has_leader` | 每个成员是否能识别 leader：`1` 表示存在，`0` 表示没有；不是该成员是否为 leader，也不能仅据此判断整个集群健康 |
+| `etcd_server_proposals_pending` | 当前等待提交的提案数，持续升高时关注负载和提交延迟 |
+| `etcd_mvcc_db_total_size_in_bytes` | 数据库物理大小（字节），包含可回收空间 |
+| `etcd_mvcc_db_total_size_in_use_in_bytes` | 数据库实际使用大小（字节），可与物理大小对比观察空间利用情况 |
+| `etcd_server_quota_backend_bytes` | 后端数据库配额（字节）；与同一成员的数据库大小对比，不要将副本大小相加作为集群容量 |
+| `azure-aks-etcd-leader-changes` | 各成员最近 15 分钟所见 leader 切换次数的最大值；频繁增长时关注稳定性 |
+| `azure-aks-etcd-proposals-failed` | 各成员最近 5 分钟提案失败速率的最大值，单位为次/秒 |
+| 两个磁盘 P99 job | 先计算各成员最近 5 分钟 WAL fsync / backend commit 延迟 P99，再取集群内最大值，单位为秒，避免合并所有成员后掩盖慢成员 |
+
+这里假设上游 `instance` 能区分 etcd 成员。请先检查实际标签；若使用其他成员标识，替换两个 P99 查询的分组字段。若 AKS 未提供成员维度，查询只能计算暴露时序的 P99，不能将其解读为最慢成员 P99。排查具体成员时，可以移除外层 `max by (cluster)`，保留成员维度。
+
+leader 切换可能被多个成员同时观察到，因此示例取最大值而不是将各成员计数相加；它是观测指标，不是严格的集群级事件审计。`increase()` 有窗口边界外推，可能返回小数。没有磁盘操作样本时，P99 可能为 `NaN`，不应改成 `0` 来表示健康。
+
+第一项保留了与通用示例重叠的 `etcd_server_has_leader`；若同时启用两个 job，可从通用示例的选择器中移除该指标，避免重复存储。所有速率、增量和分位数均已在上游计算，本地输出仍为 gauge。
+
+<a id="local-startup"></a>
+## Windows PowerShell 本地启动
+
+前置条件：安装 Go（版本满足 [go.mod](go.mod) 的要求）和 Azure CLI。以下命令在项目根目录执行，订阅 ID 和查询终结点需要替换为自己的值。
+
+```powershell
+# 登录 Azure；如果已登录，可以跳过
+az login
+
+# 选择订阅
+az account set --subscription "<subscription-id>"
+
+# 使用本机 Azure CLI 登录凭据
+$env:AZURE_AUTH = "azcli"
+
+# 从 Azure Monitor 工作区概述页复制 Query endpoint，不要使用 DCE
+$env:AZURE_PROMETHEUS_QUERY_ENDPOINT = "https://<workspace>.<region>.prometheus.monitor.azure.com"
+
+# 编译到当前目录
+go build -o azure-metrics-exporter.exe .
+
+# 前台启动，仅监听本机
+.\azure-metrics-exporter.exe --server.bind=127.0.0.1:8080 --server.timeout.write=120s
+```
+
+登录身份需要目标工作区上的 **Monitoring Data Reader** 角色。也可以在设置好上述环境变量后，直接从源码启动，替代编译和执行两个步骤：
+
+```powershell
+go run . --server.bind=127.0.0.1:8080 --server.timeout.write=120s
+```
+
+按 **Ctrl+C** 停止前台进程。如果 8080 端口被占用，可改为 8081，并同步修改验证地址。环境变量仅对当前 PowerShell 会话及其启动的子进程生效，程序不会自动读取 `.env` 文件。修改源码后，使用可执行文件启动时需要重新编译并重启。
+
+<a id="verification"></a>
+## 验证与排查
+
+启动后，在另一个 PowerShell 窗口中验证：
+
+```powershell
+# 健康检查，预期返回 Ok
+Invoke-RestMethod "http://127.0.0.1:8080/healthz"
+
+# PromQL 即时查询，返回 up 指标的时间序列数量
+Invoke-RestMethod "http://127.0.0.1:8080/probe/metrics/promql?query=count%28up%29"
+
+# 验证当前工作区所有集群的控制平面指标
+$query = [Uri]::EscapeDataString('apiserver_request_total')
+Invoke-RestMethod "http://127.0.0.1:8080/probe/metrics/promql?query=$query"
+
+# 最近 10 分钟的范围查询，步长为 60 秒，每条序列只导出最后一个数据点
+$end = [DateTimeOffset]::UtcNow
+$start = $end.AddMinutes(-10)
+$uri = "http://127.0.0.1:8080/probe/metrics/promql?query=count%28up%29&start=$($start.ToUnixTimeSeconds())&end=$($end.ToUnixTimeSeconds())&step=60"
+Invoke-RestMethod $uri
+```
+
+* **返回空结果**：先在工作区直接执行相同查询。检查 AKS 是否关联了正确工作区、控制平面开关、目标组件、minimal ingestion/keep list、实际集群标签及采集延迟。`up` 存在不代表控制平面指标已经启用；不要用 `or vector(0)` 掩盖缺失数据。
+* **401/403 或令牌获取错误**：检查导出器实际使用的身份、工作区级角色分配、登录租户以及角色生效时间。导出器可能将上游认证失败作为 HTTP 502 返回，具体原因查看响应正文和日志。
+* **超时**：检查导出器到查询终结点的网络连通性，并协调 `scrape_timeout` 与 `--server.timeout.write`。不要只提高超时，应先缩小查询范围、减少标签维度。
+* **Prometheus 抓取成功但业务指标缺失**：检查返回正文以及本地 `metric_relabel_configs`；空查询结果也可能是成功响应，不能只依赖本地 `up{job="..."}` 判断上游采集正常。
+
+<a id="references"></a>
+## 官方参考
+
+* [监控 AKS 控制平面指标：启用方式、限制和采集配置](https://learn.microsoft.com/azure/aks/control-plane-metrics-monitor)
+* [为 AKS 启用 Prometheus 和 Grafana](https://learn.microsoft.com/azure/azure-monitor/containers/kubernetes-monitoring-enable)
+* [Azure Monitor 默认 Prometheus 指标与最小摄取配置](https://learn.microsoft.com/azure/azure-monitor/containers/prometheus-metrics-scrape-default)
+* [通过 ConfigMap 自定义 Prometheus 采集](https://learn.microsoft.com/azure/azure-monitor/containers/prometheus-metrics-scrape-configuration)
+* [Azure Monitor 工作区 PromQL API](https://learn.microsoft.com/azure/azure-monitor/metrics/prometheus-api-promql)
+* [etcd 官方指标说明：Server 与 Disk](https://etcd.io/docs/v3.6/metrics/)

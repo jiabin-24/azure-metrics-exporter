@@ -291,11 +291,16 @@ func renderPromQLSamples(samples []promQLSample) (string, error) {
 		if !prometheusMetricNamePattern.MatchString(sample.name) {
 			return "", fmt.Errorf("PromQL result contains invalid Prometheus metric name %q", sample.name)
 		}
-		for labelName := range sample.labels {
+		labels, err := normalizePromQLLabels(sample.labels)
+		if err != nil {
+			return "", fmt.Errorf("PromQL metric %q: %w", sample.name, err)
+		}
+		for labelName := range labels {
 			if !prometheusLabelNamePattern.MatchString(labelName) {
 				return "", fmt.Errorf("PromQL result contains invalid Prometheus label name %q", labelName)
 			}
 		}
+		sample.labels = labels
 		groupedSamples[sample.name] = append(groupedSamples[sample.name], sample)
 	}
 
@@ -330,6 +335,38 @@ func renderPromQLSamples(samples []promQLSample) (string, error) {
 		}
 	}
 	return output.String(), nil
+}
+
+func normalizePromQLLabels(labels map[string]string) (map[string]string, error) {
+	names := make([]string, 0, len(labels))
+	for name := range labels {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	normalized := make(map[string]string, len(labels))
+	originalNames := make(map[string]string, len(labels))
+	for _, name := range names {
+		normalizedName := strings.Map(func(char rune) rune {
+			if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' ||
+				char >= '0' && char <= '9' || char == '_' {
+				return char
+			}
+			return '_'
+		}, name)
+		if normalizedName == "" || normalizedName[0] >= '0' && normalizedName[0] <= '9' {
+			normalizedName = "_" + normalizedName
+		}
+		if normalizedName == "__name__" {
+			return nil, fmt.Errorf("label %q normalizes to reserved label name %q", name, normalizedName)
+		}
+		if originalName, exists := originalNames[normalizedName]; exists {
+			return nil, fmt.Errorf("labels %q and %q normalize to the same label name %q", originalName, name, normalizedName)
+		}
+		originalNames[normalizedName] = name
+		normalized[normalizedName] = labels[name]
+	}
+	return normalized, nil
 }
 
 func escapePrometheusLabelValue(value string) string {
