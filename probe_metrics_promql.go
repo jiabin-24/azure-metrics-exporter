@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -33,6 +34,7 @@ var (
 	prometheusLabelNamePattern  = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 	promQLStandaloneSelector    = regexp.MustCompile(`^\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\}$`)
 	promQLSelectorMatcher       = regexp.MustCompile(`^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*(=~|!~|!=|=)\s*("(?:\\.|[^"\\])*")\s*`)
+	promQLNamedSelector         = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\}$`)
 )
 
 type azurePrometheusResponse struct {
@@ -52,9 +54,11 @@ type azurePrometheusVectorSample struct {
 }
 
 type promQLSample struct {
-	name   string
-	labels map[string]string
-	value  float64
+	name            string
+	labels          map[string]string
+	value           float64
+	timestampMillis int64
+	rawValue        json.RawMessage
 }
 
 type promQLQueryError struct {
@@ -100,22 +104,10 @@ func probeMetricsPromQLHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutSeconds*float64(time.Second)))
 	defer cancel()
 
-	response, statusCode, err := queryAzurePrometheus(ctx, endpoint, params, AzureClient.GetCred(), http.DefaultClient)
+	metrics, statusCode, err := collectPromQLMetrics(ctx, endpoint, params, AzureClient.GetCred(), http.DefaultClient)
 	if err != nil {
 		contextLogger.With(slog.Any("error", err)).Warn("Azure Monitor PromQL query failed")
 		http.Error(w, err.Error(), statusCode)
-		return
-	}
-
-	metrics, err := formatPromQLResponse(response)
-	if err != nil {
-		contextLogger.With(slog.Any("error", err)).Warn("unable to format Azure Monitor PromQL response")
-		var queryErr promQLQueryError
-		if errors.As(err, &queryErr) {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		} else {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-		}
 		return
 	}
 
@@ -123,6 +115,173 @@ func probeMetricsPromQLHandler(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.WriteString(w, metrics); err != nil {
 		contextLogger.With(slog.Any("error", err)).Error("unable to write PromQL metrics response")
 	}
+}
+
+func collectPromQLMetrics(
+	ctx context.Context,
+	endpoint string,
+	params url.Values,
+	credential azcore.TokenCredential,
+	client *http.Client,
+) (string, int, error) {
+	queryParams := make(url.Values, len(params)+1)
+	for name, values := range params {
+		queryParams[name] = append([]string(nil), values...)
+	}
+	if !params.Has("start") && !params.Has("end") && !params.Has("step") && !params.Has("time") {
+		// Both requests must evaluate the same instant, even across a new upstream scrape.
+		queryParams.Set("time", time.Now().UTC().Format(time.RFC3339Nano))
+	}
+	body, status, err := queryAzurePrometheus(ctx, endpoint, queryParams, credential, client)
+	if err != nil {
+		return "", status, err
+	}
+	samples, err := parsePromQLResponse(body)
+	if err != nil {
+		var queryErr promQLQueryError
+		if errors.As(err, &queryErr) {
+			return "", http.StatusBadRequest, err
+		}
+		return "", http.StatusBadGateway, err
+	}
+
+	query := strings.TrimSpace(params.Get("query"))
+	isSelector := prometheusMetricNamePattern.MatchString(query) ||
+		promQLStandaloneSelector.MatchString(query) || promQLNamedSelector.MatchString(query)
+	if isSelector && len(samples) > 0 {
+		selectors, err := promQLMetricListSelectors(query)
+		if err != nil {
+			return "", http.StatusBadRequest, err
+		}
+		nameLabel := "azure_metrics_exporter_source_name"
+		labelNames := make(map[string]bool)
+		for _, sample := range samples {
+			for name := range sample.labels {
+				labelNames[name] = true
+			}
+		}
+		for labelNames[nameLabel] {
+			nameLabel += "_"
+		}
+		sourceQuery, err := promQLSourceTimestampQuery(selectors, samples, nameLabel)
+		if err != nil {
+			return "", http.StatusBadGateway, err
+		}
+		queryParams.Set("query", sourceQuery)
+		body, status, err = queryAzurePrometheus(ctx, endpoint, queryParams, credential, client)
+		if err != nil {
+			return "", status, fmt.Errorf("failed to query source sample timestamps: %w", err)
+		}
+		timestamps, err := parsePromQLResponse(body)
+		if err != nil {
+			return "", http.StatusBadGateway, fmt.Errorf("invalid source timestamp response: %w", err)
+		}
+		if err := applyPromQLSourceTimestamps(samples, timestamps, nameLabel); err != nil {
+			return "", http.StatusBadGateway, err
+		}
+	}
+
+	output, err := renderPromQLSamples(samples)
+	if err != nil {
+		return "", http.StatusBadGateway, err
+	}
+	return output, http.StatusOK, nil
+}
+
+func promQLSourceTimestampQuery(selectors []string, samples []promQLSample, nameLabel string) (string, error) {
+	names := make(map[string]bool)
+	for _, sample := range samples {
+		if !prometheusMetricNamePattern.MatchString(sample.name) {
+			return "", errors.New("raw selector response contains an invalid metric name")
+		}
+		names[sample.name] = true
+	}
+	sortedNames := make([]string, 0, len(names))
+	for name := range names {
+		sortedNames = append(sortedNames, name)
+	}
+	sort.Strings(sortedNames)
+	var expressions []string
+	add := func(selector, name string) {
+		// timestamp() must receive the selector directly: wrapping it in
+		// label_replace() first would replace source time with evaluation time.
+		expressions = append(expressions, fmt.Sprintf(
+			`label_replace(timestamp(%s), %q, %q, "", "")`, selector, nameLabel, name,
+		))
+	}
+	for _, selector := range selectors {
+		selector = strings.TrimSpace(selector)
+		if strings.HasPrefix(selector, "{") {
+			for _, name := range sortedNames {
+				if len(sortedNames) == 1 {
+					add(selector, name)
+					continue
+				}
+				prefix := strings.TrimSpace(strings.TrimSuffix(selector, "}"))
+				if prefix != "{" && !strings.HasSuffix(prefix, ",") {
+					prefix += ","
+				}
+				add(prefix+"__name__="+strconv.Quote(name)+"}", name)
+			}
+		} else {
+			name := strings.SplitN(selector, "{", 2)[0]
+			add(selector, name)
+		}
+	}
+	return strings.Join(expressions, " or "), nil
+}
+
+func applyPromQLSourceTimestamps(samples, timestamps []promQLSample, nameLabel string) error {
+	bySeries := make(map[string]promQLSample, len(timestamps))
+	for _, timestamp := range timestamps {
+		name, exists := timestamp.labels[nameLabel]
+		if !exists || !prometheusMetricNamePattern.MatchString(name) {
+			return errors.New("source timestamp response is missing the original metric name")
+		}
+		delete(timestamp.labels, nameLabel)
+		key := promQLSeriesKey(name, timestamp.labels)
+		if _, exists := bySeries[key]; exists {
+			return errors.New("source timestamp response contains duplicate series")
+		}
+		bySeries[key] = timestamp
+	}
+	if len(samples) != len(bySeries) {
+		return errors.New("source timestamp response does not match the metric series")
+	}
+	for i := range samples {
+		timestamp, exists := bySeries[promQLSeriesKey(samples[i].name, samples[i].labels)]
+		if !exists || timestamp.timestampMillis != samples[i].timestampMillis {
+			return errors.New("source timestamp response does not match the metric series and evaluation time")
+		}
+		var seconds string
+		if err := json.Unmarshal(timestamp.rawValue, &seconds); err != nil {
+			return fmt.Errorf("invalid source sample timestamp value: %w", err)
+		}
+		sourceTime, err := parsePromQLTimestamp(json.RawMessage(seconds))
+		if err != nil {
+			return fmt.Errorf("invalid source sample timestamp: %w", err)
+		}
+		if sourceTime > samples[i].timestampMillis {
+			return errors.New("source sample timestamp is later than its evaluation time")
+		}
+		samples[i].timestampMillis = sourceTime
+	}
+	return nil
+}
+
+func promQLSeriesKey(name string, labels map[string]string) string {
+	names := make([]string, 0, len(labels))
+	for label := range labels {
+		names = append(names, label)
+	}
+	sort.Strings(names)
+	var key strings.Builder
+	key.WriteString(strconv.Quote(name))
+	for _, label := range names {
+		key.WriteString(strconv.Quote(label))
+		key.WriteString(strconv.Quote(labels[label]))
+	}
+	return key.String()
 }
 
 func queryAzurePrometheus(
@@ -195,8 +354,17 @@ func azurePrometheusQueryURL(endpoint string, requestParams url.Values) (string,
 		return "", err
 	}
 	params.Set("query", query)
+	if requestParams.Has("time") {
+		if strings.TrimSpace(requestParams.Get("time")) == "" {
+			return "", errors.New(`query parameter "time" must not be empty`)
+		}
+		params.Set("time", requestParams.Get("time"))
+	}
 	rangeQuery := requestParams.Has("start") || requestParams.Has("end") || requestParams.Has("step")
 	if rangeQuery {
+		if requestParams.Has("time") {
+			return "", errors.New(`query parameter "time" cannot be combined with start, end or step`)
+		}
 		for _, name := range []string{"start", "end", "step"} {
 			if strings.TrimSpace(requestParams.Get(name)) == "" {
 				return "", fmt.Errorf("range queries require non-empty start, end and step parameters")
@@ -210,10 +378,19 @@ func azurePrometheusQueryURL(endpoint string, requestParams url.Values) (string,
 }
 
 func expandPromQLMetricList(query string) (string, error) {
+	selectors, err := promQLMetricListSelectors(query)
+	if err != nil {
+		return "", err
+	}
+	// Ordinary or ignores metric names when matching otherwise identical labels.
+	return strings.Join(selectors, " or on (__name__) "), nil
+}
+
+func promQLMetricListSelectors(query string) ([]string, error) {
 	selector := strings.TrimSpace(query)
 	// 只展开独立选择器，避免在没有完整 PromQL 语法解析的情况下改变嵌套表达式。
 	if !promQLStandaloneSelector.MatchString(selector) {
-		return query, nil
+		return []string{query}, nil
 	}
 
 	remaining := strings.TrimSpace(selector[1 : len(selector)-1])
@@ -223,23 +400,23 @@ func expandPromQLMetricList(query string) (string, error) {
 	for remaining != "" {
 		match := promQLSelectorMatcher.FindStringSubmatch(remaining)
 		if match == nil {
-			return "", errors.New("invalid standalone PromQL selector: expected a label matcher")
+			return nil, errors.New("invalid standalone PromQL selector: expected a label matcher")
 		}
 		if match[1] == "__name__" {
 			nameMatchers++
 			if nameMatchers > 1 {
-				return "", errors.New("standalone PromQL selectors support only one __name__ matcher")
+				return nil, errors.New("standalone PromQL selectors support only one __name__ matcher")
 			}
 			if match[2] == "=~" {
 				value, err := strconv.Unquote(match[3])
 				if err != nil {
-					return "", fmt.Errorf("invalid PromQL metric list string: %w", err)
+					return nil, fmt.Errorf("invalid PromQL metric list string: %w", err)
 				}
 				seen := make(map[string]bool)
 				for _, name := range strings.Split(value, "|") {
 					// 只接受完整指标名的并集，不能把通配符等正则语义误当成字面名称。
 					if !prometheusMetricNamePattern.MatchString(name) {
-						return "", errors.New("PromQL metric name regex compatibility supports only a fixed list such as metric_a|metric_b; wildcards, groups, anchors and empty alternatives are not supported")
+						return nil, errors.New("PromQL metric name regex compatibility supports only a fixed list such as metric_a|metric_b; wildcards, groups, anchors and empty alternatives are not supported")
 					}
 					if !seen[name] {
 						metricNames = append(metricNames, name)
@@ -257,12 +434,12 @@ func expandPromQLMetricList(query string) (string, error) {
 			break
 		}
 		if remaining[0] != ',' {
-			return "", errors.New("invalid standalone PromQL selector: expected a comma between label matchers")
+			return nil, errors.New("invalid standalone PromQL selector: expected a comma between label matchers")
 		}
 		remaining = strings.TrimSpace(remaining[1:])
 	}
 	if len(metricNames) == 0 {
-		return query, nil
+		return []string{query}, nil
 	}
 	suffix := ""
 	if len(matchers) > 0 {
@@ -272,23 +449,22 @@ func expandPromQLMetricList(query string) (string, error) {
 	for _, name := range metricNames {
 		selectors = append(selectors, name+suffix)
 	}
-	// 普通 or 忽略指标名参与匹配，可能丢弃其他标签相同的不同指标。
-	return strings.Join(selectors, " or on (__name__) "), nil
+	return selectors, nil
 }
 
-func formatPromQLResponse(body []byte) (string, error) {
+func parsePromQLResponse(body []byte) ([]promQLSample, error) {
 	var response azurePrometheusResponse
 	if err := json.Unmarshal(body, &response); err != nil {
-		return "", fmt.Errorf("invalid Azure Monitor PromQL response: %w", err)
+		return nil, fmt.Errorf("invalid Azure Monitor PromQL response: %w", err)
 	}
 	if response.Status != "success" {
 		if response.Error == "" {
 			response.Error = "Azure Monitor returned an unsuccessful PromQL response"
 		}
 		if response.ErrorType != "" {
-			return "", promQLQueryError{message: fmt.Sprintf("%s: %s", response.ErrorType, response.Error)}
+			return nil, promQLQueryError{message: fmt.Sprintf("%s: %s", response.ErrorType, response.Error)}
 		}
-		return "", promQLQueryError{message: response.Error}
+		return nil, promQLQueryError{message: response.Error}
 	}
 
 	var samples []promQLSample
@@ -296,22 +472,26 @@ func formatPromQLResponse(body []byte) (string, error) {
 	case "vector", "matrix":
 		var result []azurePrometheusVectorSample
 		if err := json.Unmarshal(response.Data.Result, &result); err != nil {
-			return "", fmt.Errorf("invalid PromQL %s result: %w", response.Data.ResultType, err)
+			return nil, fmt.Errorf("invalid PromQL %s result: %w", response.Data.ResultType, err)
 		}
 		for _, vectorSample := range result {
 			point := vectorSample.Value
 			if response.Data.ResultType == "matrix" {
 				if len(vectorSample.Values) == 0 {
-					return "", errors.New("PromQL matrix series does not contain float samples")
+					return nil, errors.New("PromQL matrix series does not contain float samples")
 				}
 				point = vectorSample.Values[len(vectorSample.Values)-1]
 			}
 			if len(point) != 2 {
-				return "", fmt.Errorf("PromQL %s result does not contain a timestamp and value", response.Data.ResultType)
+				return nil, fmt.Errorf("PromQL %s result does not contain a timestamp and value", response.Data.ResultType)
+			}
+			timestamp, err := parsePromQLTimestamp(point[0])
+			if err != nil {
+				return nil, err
 			}
 			value, err := parsePromQLValue(point[1])
 			if err != nil {
-				return "", err
+				return nil, err
 			}
 
 			name := vectorSample.Metric["__name__"]
@@ -324,26 +504,58 @@ func formatPromQLResponse(body []byte) (string, error) {
 					labels[labelName] = labelValue
 				}
 			}
-			samples = append(samples, promQLSample{name: name, labels: labels, value: value})
+			samples = append(samples, promQLSample{name: name, labels: labels, value: value, timestampMillis: timestamp, rawValue: point[1]})
 		}
 	case "scalar":
 		var result []json.RawMessage
 		if err := json.Unmarshal(response.Data.Result, &result); err != nil {
-			return "", fmt.Errorf("invalid PromQL scalar result: %w", err)
+			return nil, fmt.Errorf("invalid PromQL scalar result: %w", err)
 		}
 		if len(result) != 2 {
-			return "", errors.New("PromQL scalar result does not contain a timestamp and value")
+			return nil, errors.New("PromQL scalar result does not contain a timestamp and value")
+		}
+		timestamp, err := parsePromQLTimestamp(result[0])
+		if err != nil {
+			return nil, err
 		}
 		value, err := parsePromQLValue(result[1])
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		samples = append(samples, promQLSample{name: promQLResultMetricName, labels: map[string]string{}, value: value})
+		samples = append(samples, promQLSample{name: promQLResultMetricName, labels: map[string]string{}, value: value, timestampMillis: timestamp, rawValue: result[1]})
 	default:
-		return "", fmt.Errorf("unsupported PromQL result type %q; vector, scalar and matrix results are supported", response.Data.ResultType)
+		return nil, fmt.Errorf("unsupported PromQL result type %q; vector, scalar and matrix results are supported", response.Data.ResultType)
 	}
 
-	return renderPromQLSamples(samples)
+	return samples, nil
+}
+
+func parsePromQLTimestamp(raw json.RawMessage) (int64, error) {
+	number := strings.TrimSpace(string(raw))
+	if len(number) == 0 || len(number) > 128 || !json.Valid(raw) ||
+		(number[0] != '-' && (number[0] < '0' || number[0] > '9')) {
+		return 0, errors.New("PromQL timestamp must be a Unix timestamp in numeric seconds")
+	}
+	if i := strings.IndexAny(number, "eE"); i >= 0 {
+		exponent, err := strconv.Atoi(number[i+1:])
+		if err != nil || exponent < -100 || exponent > 100 {
+			return 0, errors.New("PromQL timestamp exponent is out of range")
+		}
+	}
+	seconds, ok := new(big.Rat).SetString(number)
+	if !ok {
+		return 0, errors.New("invalid numeric PromQL timestamp")
+	}
+	milliseconds := new(big.Rat).Mul(seconds, big.NewRat(1000, 1))
+	integer, remainder := new(big.Int), new(big.Int)
+	integer.QuoRem(milliseconds.Num(), milliseconds.Denom(), remainder)
+	if remainder.Sign() < 0 {
+		integer.Sub(integer, big.NewInt(1))
+	}
+	if !integer.IsInt64() {
+		return 0, errors.New("PromQL timestamp exceeds the supported millisecond range")
+	}
+	return integer.Int64(), nil
 }
 
 func parsePromQLValue(rawValue json.RawMessage) (float64, error) {
@@ -404,7 +616,7 @@ func renderPromQLSamples(samples []promQLSample) (string, error) {
 				}
 				output.WriteByte('}')
 			}
-			fmt.Fprintf(&output, " %s\n", strconv.FormatFloat(sample.value, 'g', -1, 64))
+			fmt.Fprintf(&output, " %s %d\n", strconv.FormatFloat(sample.value, 'g', -1, 64), sample.timestampMillis)
 		}
 	}
 	return output.String(), nil

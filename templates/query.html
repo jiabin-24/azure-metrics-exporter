@@ -323,7 +323,7 @@ count</textarea>
 
             <div class="mb-3 row" query-endpoint="/probe/metrics/promql">
                 <h3>PromQL</h3>
-                <div class="form-text">Uses the configured Azure Monitor workspace query endpoint and Azure identity. Range queries export only the last data point per series.</div>
+                <div class="form-text">Uses the configured Azure Monitor workspace query endpoint and Azure identity. Raw selectors use source sample timestamps; expressions use evaluation timestamps. Range queries export only the last data point per series. Keep honor_timestamps enabled in Prometheus.</div>
             </div>
 
             <div class="mb-3 row" query-endpoint="/probe/metrics/promql">
@@ -331,6 +331,14 @@ count</textarea>
                 <div class="col-sm-10">
                     <textarea class="form-control" id="query" rows="4" placeholder="count(up)"></textarea>
                     <div class="form-text">PromQL expression (required). Multiline expressions are supported.</div>
+                </div>
+            </div>
+
+            <div class="mb-3 row" query-endpoint="/probe/metrics/promql">
+                <label for="time" class="col-sm-2 col-form-label">time</label>
+                <div class="col-sm-10">
+                    <input type="text" class="form-control" id="time" placeholder="Optional: RFC3339 or Unix seconds">
+                    <div class="form-text">Instant evaluation time; defaults to now. Do not combine with start, end or step. A fixed time is for testing, not continuous monitoring.</div>
                 </div>
             </div>
 
@@ -501,6 +509,7 @@ count</textarea>
                         queryEndpoint = fieldValue;
                         break;
                     case "query":
+                    case "time":
                     case "start":
                     case "end":
                     case "step":
@@ -538,6 +547,10 @@ count</textarea>
                     if ((queryParams.start || queryParams.end || queryParams.step) &&
                         !(queryParams.start && queryParams.end && queryParams.step)) {
                         alert("Range queries require start, end and step together");
+                        return;
+                    }
+                    if (queryParams.time && (queryParams.start || queryParams.end || queryParams.step)) {
+                        alert("Instant query time cannot be combined with start, end or step");
                         return;
                     }
                 }

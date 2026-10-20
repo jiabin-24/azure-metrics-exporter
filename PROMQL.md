@@ -35,6 +35,7 @@ AZURE_PROMETHEUS_QUERY_ENDPOINT=https://<workspace>.<region>.prometheus.monitor.
 - job_name: azure-control-plane
   scrape_interval: 1m
   scrape_timeout: 30s
+  honor_timestamps: true
   metrics_path: /probe/metrics/promql
   params:
     query: ["apiserver_request_total"]
@@ -47,11 +48,12 @@ AZURE_PROMETHEUS_QUERY_ENDPOINT=https://<workspace>.<region>.prometheus.monitor.
 <a id="query-parameters"></a>
 ## 查询参数与结果
 
-也可以在 `/query` Web UI 的 endpoint 下拉框中选择 `/probe/metrics/promql`，填写 `query` 执行即时查询；范围查询需同时填写 `start`、`end`、`step`。页面会显示查询响应并生成对应的 Prometheus 抓取配置。
+也可以在 `/query` Web UI 的 endpoint 下拉框中选择 `/probe/metrics/promql`，填写 `query` 执行即时查询，可用 `time` 指定测试求值时间；范围查询需同时填写 `start`、`end`、`step`，且不能填写 `time`。页面会显示查询响应并生成对应的 Prometheus 抓取配置。固定 `time` 仅用于调试历史结果，不应放入持续监控当前状态的 job。
 
 | GET 参数 | 必填 | 描述 |
 |----------|------|------|
 | `query` | 是 | PromQL 表达式 |
+| `time` | 否 | 即时查询的求值时间，支持 RFC3339 或 Unix 秒；不传时使用本次请求开始查询时的时间。不能与范围查询参数同时使用 |
 | `start` | 范围查询必填 | 开始时间，支持 RFC3339 时间或 Unix 时间戳（秒） |
 | `end` | 范围查询必填 | 结束时间，格式与 `start` 相同 |
 | `step` | 范围查询必填 | 查询步长，支持秒数或时间长度，例如 `60`、`1m` |
@@ -68,7 +70,26 @@ params:
   step: ["1m"]
 ```
 
-与原有 Azure Metrics 导出行为一致，范围查询返回矩阵时，每条时间序列只导出上游返回的最后一个数据点，不输出原始时间戳，也不回填整段历史数据。固定时间范围被重复抓取时，会重复导出该范围的最后一个值；监控当前状态时优先使用即时查询。
+范围查询返回矩阵时，每条时间序列仍只导出上游返回的最后一个数据点，不回填整段历史数据。输出默认携带显式时间戳（Unix 毫秒），不再让 Prometheus 使用本次抓取时间。固定时间范围被重复抓取时，会重复输出相同时间点，不能将其用于持续监控当前状态。
+
+### 采样时间（默认启用）
+
+仅 `/probe/metrics/promql` 改为默认保留时间；原有 Azure 平台指标端点和 `/metrics` 自身指标的行为不变。
+
+| 查询形式 | 输出时间 |
+|----------|----------|
+| 单独的原始指标选择器，例如 `apiserver_request_total`、`etcd_server_has_leader{cluster="prod"}`、`{__name__="etcd_server_has_leader"}` | 额外查询 `timestamp(...)`，以被选中原始样本的采集时间输出 |
+| 独立的固定指标名列表 `{__name__=~"metric_a\|metric_b"}` | 同上；保留各指标自己的原始采样时间，即使其他标签完全相同 |
+| 即时查询中的原始范围向量，例如 `apiserver_request_total[5m]` | 保留返回矩阵最后一个原始样本的时间，不额外查询 |
+| `rate(...)`、`sum(...)`、算术及其他表达式 | 保留 API 返回的查询求值时间；计算结果没有唯一的原始采样时间 |
+
+自动获取原始采样时间仅适用于上述独立选择器；带括号、`offset`、`@` 或其他运算的表达式不自动改写，使用 API 结果时间。`query_range` 中的独立选择器同样会获取其最后一个求值点对应的原始采样时间；其他范围表达式保留最后一个求值时间。原始范围向量是否可用取决于 Azure 对具体查询的支持；上游拒绝时明确返回错误。
+
+例如上游最近一次采样是 `10:00:00`，导出器在 `10:02:00` 查询原始指标时，输出样本归属于 `10:00:00`；若查询的是 `rate(...[5m])`，则输出时间表示该速率结果的求值时间，而不是某个原始请求的发生时间。
+
+原始选择器每次抓取会产生两次 PromQL 请求：一次取值，一次取采样时间。两次请求使用相同的即时求值时间或范围参数，并按原始指标名及完整标签集匹配结果；不会把不同指标的时间混在一起。该机制不是上游数据库的事务快照，迟到数据在两次请求之间入库时仍可能影响查询结果。获取时间失败、时间非法或结果无法匹配时明确报错，不回退为本地时间。应根据额外请求开销调整并发、超时和抓取周期。
+
+Prometheus 抓取端应启用 `honor_timestamps: true`（默认值），否则显式时间戳会被忽略。重复的源样本不会因为重新抓取而变成新样本；旧数据可能超出 Prometheus 的查询回看窗口而不再显示，需要配置数据新鲜度告警。乱序或同一时间戳不同值的样本可能被拒绝；此功能不提供历史补采、修订或完整时序同步。
 
 查询结果中的 `__name__` 会作为导出的指标名称；如果结果没有指标名（例如聚合表达式），则使用 `azure_promql_query_result`。端点支持数值型即时向量、标量和范围矩阵结果，不支持字符串或原生直方图结果；所有结果以 gauge 导出。
 
