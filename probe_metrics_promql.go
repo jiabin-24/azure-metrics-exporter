@@ -112,7 +112,8 @@ func probeMetricsPromQLHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	if _, err := io.WriteString(w, metrics); err != nil {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if _, err := io.WriteString(w, metrics); err != nil { // #nosec G705 -- Prometheus text, not HTML; explicit text/plain and nosniff prevent HTML interpretation. HTML escaping would corrupt label values.
 		contextLogger.With(slog.Any("error", err)).Error("unable to write PromQL metrics response")
 	}
 }
