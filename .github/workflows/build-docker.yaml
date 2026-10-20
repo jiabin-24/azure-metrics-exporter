@@ -56,8 +56,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ github.repository }}
-            quay.io/${{ github.repository }}
+            niuai/azure-metrics-exporter
           labels: |
             io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.repository.default_branch }}/README.md
           flavor: |
@@ -76,14 +75,6 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Login to Quay
-        uses: docker/login-action@v3
-        if: ${{ inputs.publish }}
-        with:
-          registry: quay.io
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_TOKEN }}
 
       - name: ${{ inputs.publish && 'Build and push' || 'Build' }}
         uses: docker/build-push-action@v6

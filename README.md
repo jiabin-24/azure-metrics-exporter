@@ -2,7 +2,6 @@
 
 [![license](https://img.shields.io/github/license/webdevops/azure-metrics-exporter.svg)](https://github.com/webdevops/azure-metrics-exporter/blob/master/LICENSE)
 [![DockerHub](https://img.shields.io/badge/DockerHub-webdevops%2Fazure--metrics--exporter-blue)](https://hub.docker.com/r/webdevops/azure-metrics-exporter/)
-[![Quay.io](https://img.shields.io/badge/Quay.io-webdevops%2Fazure--metrics--exporter-blue)](https://quay.io/repository/webdevops/azure-metrics-exporter)
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/azure-metrics-exporter)](https://artifacthub.io/packages/search?repo=azure-metrics-exporter)
 
 用于导出 Azure Monitor 指标的 Prometheus 导出器。
@@ -51,7 +50,7 @@
 - 可在抓取配置中处理指标（添加、删除、更新或筛选标签或指标），例如 [`metric_relabel_configs`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#metric_relabel_configs)
 - 完整支持指标[维度](#virtualnetworkgateway-connections-dimension-support)
 - Docker 镜像基于 [Google 的 distroless](https://github.com/GoogleContainerTools/distroless) 静态镜像构建，以缩小攻击面（镜像中不含 shell 或其他二进制文件）
-- 可通过 Docker Hub 和 Quay 获取（参见上方徽章）
+- 可通过 Docker Hub 获取（参见上方徽章）
 - 可使用非 root 用户运行，并将根文件系统设为只读；无需任何 Linux capability（可以安全地设置 `drop: ["All"]`）
 - 提供 Azure API 速率限制指标（导出器发送 Azure API 请求时，这些指标可通过 `/metrics` 获取）
 
