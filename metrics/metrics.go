@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -15,10 +17,26 @@ type (
 	}
 
 	MetricRow struct {
-		Labels prometheus.Labels
-		Value  float64
+		Labels    prometheus.Labels
+		Value     float64
+		Timestamp time.Time
+	}
+
+	timestampedGaugeCollector struct {
+		gauge      *prometheus.GaugeVec
+		timestamps map[prometheus.Gauge]time.Time
 	}
 )
+
+func (c *timestampedGaugeCollector) Describe(ch chan<- *prometheus.Desc) {
+	c.gauge.Describe(ch)
+}
+
+func (c *timestampedGaugeCollector) Collect(ch chan<- prometheus.Metric) {
+	for gauge, timestamp := range c.timestamps {
+		ch <- prometheus.NewMetricWithTimestamp(timestamp, gauge)
+	}
+}
 
 func NewMetricList() *MetricList {
 	list := MetricList{}

@@ -266,8 +266,9 @@ func (p *MetricProber) collectMetricsFromSubscriptions() {
 
 	for result := range metricsChannel {
 		metric := MetricRow{
-			Labels: result.Labels,
-			Value:  result.Value,
+			Labels:    result.Labels,
+			Value:     result.Value,
+			Timestamp: result.Timestamp,
 		}
 		p.metricList.Add(result.Name, metric)
 		p.metricList.SetMetricHelp(result.Name, result.Help)
@@ -362,8 +363,9 @@ func (p *MetricProber) collectMetricsFromTargets() {
 
 	for result := range metricsChannel {
 		metric := MetricRow{
-			Labels: result.Labels,
-			Value:  result.Value,
+			Labels:    result.Labels,
+			Value:     result.Value,
+			Timestamp: result.Timestamp,
 		}
 		p.metricList.Add(result.Name, metric)
 		p.metricList.SetMetricHelp(result.Name, result.Help)
@@ -384,10 +386,15 @@ func (p *MetricProber) publishMetricList() {
 			},
 			p.metricList.GetMetricLabelNames(metricName),
 		)
-		p.prometheus.registry.MustRegister(gauge)
-
-		for _, row := range p.metricList.GetMetricList(metricName) {
-			gauge.With(row.Labels).Set(row.Value)
+		collector := &timestampedGaugeCollector{
+			gauge:      gauge,
+			timestamps: make(map[prometheus.Gauge]time.Time),
 		}
+		for _, row := range p.metricList.GetMetricList(metricName) {
+			metric := gauge.With(row.Labels)
+			metric.Set(row.Value)
+			collector.timestamps[metric] = row.Timestamp
+		}
+		p.prometheus.registry.MustRegister(collector)
 	}
 }

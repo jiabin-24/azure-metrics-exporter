@@ -74,7 +74,7 @@ params:
 
 ### 采样时间（默认启用）
 
-仅 `/probe/metrics/promql` 改为默认保留时间；原有 Azure 平台指标端点和 `/metrics` 自身指标的行为不变。
+`/probe/metrics/promql` 默认保留上游时间，具体规则如下。原有 Azure 平台指标端点也默认保留 Azure 数据点的 `TimeStamp`，详见 [平台指标源时间戳](README.md#源时间戳)；`/metrics` 自身指标的行为不变。
 
 | 查询形式 | 输出时间 |
 |----------|----------|

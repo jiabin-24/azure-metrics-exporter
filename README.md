@@ -109,6 +109,14 @@ Web UI 的访问路径为 `/query`。
 <a id="metrics"></a>
 ## 指标
 
+### 源时间戳
+
+Azure 平台指标的所有 probe 路径（资源、订阅及资源发现）默认保留 Azure 数据点的 `TimeStamp`，以 Unix 毫秒时间戳输出；不增加 Azure API 请求。同一指标名及标签组合仍只输出最后一个非空聚合值，并使用该值对应的时间戳，缓存命中也不更新源时间。缺少有效时间戳的数据点会记录错误并跳过，不使用本地时间代替。
+
+Prometheus 抓取配置应保持 `honor_timestamps: true`（默认值）。平台指标的时间表示 Azure 聚合时间桶对应的时间，不是单个业务事件的精确发生时间。保留源时间不等于历史补采：旧值不再被刷新为当前样本，可能因超出查询回看窗口而不显示；乱序和同一时间戳不同值的修订也可能被拒绝，应配套数据新鲜度告警。
+
+`/metrics` 的导出器运行指标不受影响；PromQL 指标的原始采样时间和求值时间规则参见 [PromQL 采样时间](PROMQL.md#采样时间默认启用)。
+
 | 指标                                     | 描述                                                                                          |
 |------------------------------------------|-------------------------------------------------------------------------------------------------|
 | `azurerm_stats_metric_collecttime`       | 导出器的常规统计信息                                                                                |
@@ -315,7 +323,7 @@ azurerm_ratelimit{scope="subscription",subscriptionID="...",type="read"} 11999
 <a id="promql-query"></a>
 ### `/probe/metrics/promql`（PromQL）
 
-参数、身份权限、即时/范围查询、本地启动及 AKS 高级控制平面指标的 job 配置已移至独立文档：[PromQL 查询与 AKS 控制平面指标](PROMQL.md)。该端点默认输出显式时间戳：独立原始指标选择器使用源采样时间，计算表达式使用查询求值时间；Prometheus 应保留 `honor_timestamps: true`。原有 Azure 平台指标端点行为不变。
+参数、身份权限、即时/范围查询、本地启动及 AKS 高级控制平面指标的 job 配置已移至独立文档：[PromQL 查询与 AKS 控制平面指标](PROMQL.md)。该端点默认输出显式时间戳：独立原始指标选择器使用源采样时间，计算表达式使用查询求值时间；Prometheus 应保留 `honor_timestamps: true`。
 
 <a id="probemetrics-parameters"></a>
 ### /probe/metrics 参数

@@ -1,8 +1,11 @@
 package metrics
 
 import (
+	"log/slog"
 	"strings"
+	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -12,7 +15,31 @@ type (
 	}
 )
 
-func (r *AzureInsightBaseMetricsResult) buildMetric(labels prometheus.Labels, value float64) (metric PrometheusMetricResult) {
+func (r *AzureInsightBaseMetricsResult) sendDataPoints(channel chan<- PrometheusMetricResult, labels prometheus.Labels, data []*armmonitor.MetricValue) {
+	for _, point := range data {
+		if point.TimeStamp == nil || point.TimeStamp.IsZero() {
+			r.prober.logger.Error("Azure metric data point has no source timestamp", slog.Any("labels", labels))
+			continue
+		}
+		for _, aggregation := range []struct {
+			name  string
+			value *float64
+		}{
+			{"total", point.Total},
+			{"minimum", point.Minimum},
+			{"maximum", point.Maximum},
+			{"average", point.Average},
+			{"count", point.Count},
+		} {
+			if aggregation.value != nil {
+				labels["aggregation"] = aggregation.name
+				channel <- r.buildMetric(labels, *aggregation.value, *point.TimeStamp)
+			}
+		}
+	}
+}
+
+func (r *AzureInsightBaseMetricsResult) buildMetric(labels prometheus.Labels, value float64, timestamp time.Time) (metric PrometheusMetricResult) {
 	// copy map to ensure we don't keep references
 	metricLabels := prometheus.Labels{}
 	for labelName, labelValue := range labels {
@@ -20,9 +47,10 @@ func (r *AzureInsightBaseMetricsResult) buildMetric(labels prometheus.Labels, va
 	}
 
 	metric = PrometheusMetricResult{
-		Name:   r.prober.settings.MetricTemplate,
-		Labels: metricLabels,
-		Value:  value,
+		Name:      r.prober.settings.MetricTemplate,
+		Labels:    metricLabels,
+		Value:     value,
+		Timestamp: timestamp,
 	}
 
 	// fallback if template is empty (should not be)

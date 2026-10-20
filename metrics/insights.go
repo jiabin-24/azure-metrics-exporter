@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,10 +20,11 @@ var (
 
 type (
 	PrometheusMetricResult struct {
-		Name   string
-		Labels prometheus.Labels
-		Value  float64
-		Help   string
+		Name      string
+		Labels    prometheus.Labels
+		Value     float64
+		Help      string
+		Timestamp time.Time
 	}
 )
 

@@ -89,47 +89,7 @@ func (r *AzureInsightSubscriptionMetricsResult) SendMetricToChannel(channel chan
 							}
 						}
 
-						for _, timeseriesData := range timeseries.Data {
-							if timeseriesData.Total != nil {
-								metricLabels["aggregation"] = "total"
-								channel <- r.buildMetric(
-									metricLabels,
-									*timeseriesData.Total,
-								)
-							}
-
-							if timeseriesData.Minimum != nil {
-								metricLabels["aggregation"] = "minimum"
-								channel <- r.buildMetric(
-									metricLabels,
-									*timeseriesData.Minimum,
-								)
-							}
-
-							if timeseriesData.Maximum != nil {
-								metricLabels["aggregation"] = "maximum"
-								channel <- r.buildMetric(
-									metricLabels,
-									*timeseriesData.Maximum,
-								)
-							}
-
-							if timeseriesData.Average != nil {
-								metricLabels["aggregation"] = "average"
-								channel <- r.buildMetric(
-									metricLabels,
-									*timeseriesData.Average,
-								)
-							}
-
-							if timeseriesData.Count != nil {
-								metricLabels["aggregation"] = "count"
-								channel <- r.buildMetric(
-									metricLabels,
-									*timeseriesData.Count,
-								)
-							}
-						}
+						r.sendDataPoints(channel, metricLabels, timeseries.Data)
 					}
 				}
 			}
