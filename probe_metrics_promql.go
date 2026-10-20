@@ -125,13 +125,9 @@ func collectPromQLMetrics(
 	credential azcore.TokenCredential,
 	client *http.Client,
 ) (string, int, error) {
-	queryParams := make(url.Values, len(params)+1)
-	for name, values := range params {
-		queryParams[name] = append([]string(nil), values...)
-	}
-	if !params.Has("start") && !params.Has("end") && !params.Has("step") && !params.Has("time") {
-		// Both requests must evaluate the same instant, even across a new upstream scrape.
-		queryParams.Set("time", time.Now().UTC().Format(time.RFC3339Nano))
+	queryParams, err := preparePromQLQueryParams(params, time.Now().UTC())
+	if err != nil {
+		return "", http.StatusBadRequest, err
 	}
 	body, status, err := queryAzurePrometheus(ctx, endpoint, queryParams, credential, client)
 	if err != nil {
@@ -187,6 +183,36 @@ func collectPromQLMetrics(
 		return "", http.StatusBadGateway, err
 	}
 	return output, http.StatusOK, nil
+}
+
+func preparePromQLQueryParams(params url.Values, now time.Time) (url.Values, error) {
+	queryParams := make(url.Values, len(params)+1)
+	for name, values := range params {
+		queryParams[name] = append([]string(nil), values...)
+	}
+	rangeQuery := params.Has("start") || params.Has("end") || params.Has("step")
+	if params.Has("query_delay") {
+		if params.Has("time") || rangeQuery {
+			return nil, errors.New(`query parameter "query_delay" cannot be combined with time, start, end or step`)
+		}
+		values := params["query_delay"]
+		if len(values) != 1 || strings.TrimSpace(values[0]) == "" {
+			return nil, errors.New(`query parameter "query_delay" requires exactly one non-empty duration`)
+		}
+		delay, err := time.ParseDuration(strings.TrimSpace(values[0]))
+		if err != nil {
+			return nil, fmt.Errorf(`invalid query parameter "query_delay" (use a duration such as 20m or 1h): %w`, err)
+		}
+		if delay < 0 {
+			return nil, errors.New(`query parameter "query_delay" must not be negative`)
+		}
+		queryParams.Del("query_delay")
+		queryParams.Set("time", now.Add(-delay).UTC().Format(time.RFC3339Nano))
+	} else if !rangeQuery && !params.Has("time") {
+		// Both requests must evaluate the same instant, even across a new upstream scrape.
+		queryParams.Set("time", now.UTC().Format(time.RFC3339Nano))
+	}
+	return queryParams, nil
 }
 
 func promQLSourceTimestampQuery(selectors []string, samples []promQLSample, nameLabel string) (string, error) {

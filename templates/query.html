@@ -338,7 +338,15 @@ count</textarea>
                 <label for="time" class="col-sm-2 col-form-label">time</label>
                 <div class="col-sm-10">
                     <input type="text" class="form-control" id="time" placeholder="Optional: RFC3339 or Unix seconds">
-                    <div class="form-text">Instant evaluation time; defaults to now. Do not combine with start, end or step. A fixed time is for testing, not continuous monitoring.</div>
+                    <div class="form-text">Instant evaluation time; defaults to now. Do not combine with query_delay, start, end or step. A fixed time is for testing, not continuous monitoring.</div>
+                </div>
+            </div>
+
+            <div class="mb-3 row" query-endpoint="/probe/metrics/promql">
+                <label for="query_delay" class="col-sm-2 col-form-label">query_delay</label>
+                <div class="col-sm-10">
+                    <input type="text" class="form-control" id="query_delay" placeholder="Optional: 20m or 1h">
+                    <div class="form-text">Evaluate at now minus this non-negative duration on every scrape. Instant queries only; do not combine with time, start, end or step. Expressions retain the delayed evaluation timestamp, not the current scrape time.</div>
                 </div>
             </div>
 
@@ -510,6 +518,7 @@ count</textarea>
                         break;
                     case "query":
                     case "time":
+                    case "query_delay":
                     case "start":
                     case "end":
                     case "step":
@@ -551,6 +560,10 @@ count</textarea>
                     }
                     if (queryParams.time && (queryParams.start || queryParams.end || queryParams.step)) {
                         alert("Instant query time cannot be combined with start, end or step");
+                        return;
+                    }
+                    if (queryParams.query_delay && (queryParams.time || queryParams.start || queryParams.end || queryParams.step)) {
+                        alert("Query delay cannot be combined with time, start, end or step");
                         return;
                     }
                 }

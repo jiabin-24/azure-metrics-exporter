@@ -48,12 +48,13 @@ AZURE_PROMETHEUS_QUERY_ENDPOINT=https://<workspace>.<region>.prometheus.monitor.
 <a id="query-parameters"></a>
 ## 查询参数与结果
 
-也可以在 `/query` Web UI 的 endpoint 下拉框中选择 `/probe/metrics/promql`，填写 `query` 执行即时查询，可用 `time` 指定测试求值时间；范围查询需同时填写 `start`、`end`、`step`，且不能填写 `time`。页面会显示查询响应并生成对应的 Prometheus 抓取配置。固定 `time` 仅用于调试历史结果，不应放入持续监控当前状态的 job。
+也可以在 `/query` Web UI 的 endpoint 下拉框中选择 `/probe/metrics/promql`，填写 `query` 执行即时查询，可用 `time` 指定测试求值时间，或用 `query_delay` 动态延迟求值；范围查询需同时填写 `start`、`end`、`step`，且不能填写 `time` 或 `query_delay`。页面会显示查询响应并生成对应的 Prometheus 抓取配置。固定 `time` 仅用于调试历史结果，不应放入持续监控当前状态的 job。
 
 | GET 参数 | 必填 | 描述 |
 |----------|------|------|
 | `query` | 是 | PromQL 表达式 |
-| `time` | 否 | 即时查询的求值时间，支持 RFC3339 或 Unix 秒；不传时使用本次请求开始查询时的时间。不能与范围查询参数同时使用 |
+| `time` | 否 | 即时查询的固定求值时间，支持 RFC3339 或 Unix 秒；未配置 `time` 和 `query_delay` 时使用本次请求开始查询时的时间。不能与 `query_delay` 或范围查询参数同时使用 |
+| `query_delay` | 否 | 即时查询的动态延迟，每次请求按当前时间减去该时长求值。使用非负 Go duration，如 `20m`、`1h`、`1h30m`、`30s`；`0s` 等同不延迟。不接受空值、重复值、负数、无单位的非零数字或 `1d`。不能与 `time`、`start`、`end`、`step` 同时使用 |
 | `start` | 范围查询必填 | 开始时间，支持 RFC3339 时间或 Unix 时间戳（秒） |
 | `end` | 范围查询必填 | 结束时间，格式与 `start` 相同 |
 | `step` | 范围查询必填 | 查询步长，支持秒数或时间长度，例如 `60`、`1m` |
@@ -71,6 +72,33 @@ params:
 ```
 
 范围查询返回矩阵时，每条时间序列仍只导出上游返回的最后一个数据点，不回填整段历史数据。输出默认携带显式时间戳（Unix 毫秒），不再让 Prometheus 使用本次抓取时间。固定时间范围被重复抓取时，会重复输出相同时间点，不能将其用于持续监控当前状态。
+
+### 入库延迟与动态查询时间
+
+Azure 数据可能尚未入库，导致当前即时查询为空，而历史范围查询有数据。可在 job 中配置 `query_delay`，无需在 PromQL 中添加 `offset`：
+
+```yaml
+- job_name: azure-aks-etcd-network
+  scrape_interval: 1m
+  scrape_timeout: 30s
+  honor_timestamps: true
+  metrics_path: /probe/metrics/promql
+  params:
+    query:
+    - 'sum(rate(etcd_network_client_grpc_sent_bytes_total{cluster="sk-rundeck"}[1m]))'
+    query_delay: ["20m"]
+  static_configs:
+  - targets: ["azure-metrics:8080"]
+```
+
+此示例的集群标签和 `20m` 需按实际环境调整；使用 `30s` 抓取超时时，仍需协调导出器写超时，例如 `--server.timeout.write=120s`。Web UI 也可填写 `query_delay`，但必须清空 `time`、`start`、`end` 和 `step`。
+
+例如在 `00:30` 抓取时，导出器向上游发送 `time=00:10`；下一分钟抓取自动推进到 `00:11`。`query_delay` 是导出器参数，不转发给 Azure。原始选择器的值查询和源时间戳查询共用同一个延迟后的求值时间。
+
+- 原始指标仍输出源采样时间；`rate`、`sum` 等表达式输出延迟后的求值时间，不标记为当前抓取时间。它与只在表达式中添加 `offset` 不同；不要为同一延迟同时配置两者。
+- 保持 `honor_timestamps: true`，不要将历史值重打为当前时间。未配置 `query_delay` 的 job 行为不变；非法或冲突参数返回 HTTP 400。
+- 延迟值不是自动探测的，应留出实际摄取延迟的安全余量。超过该余量仍可能返回空结果；空结果不补零，也不复用旧值，不保证历史补采。
+- Prometheus 默认即时查询回看窗口通常为 5 分钟；20 分钟前的样本即使成功入库，也不会自动出现在当前即时查询中。历史图和告警必须考虑此延迟，例如对本地结果使用相应的查询偏移，并明确展示数据滞后；不要用空值补零掩盖缺失。
 
 ### 采样时间（默认启用）
 
@@ -460,7 +488,7 @@ $uri = "http://127.0.0.1:8080/probe/metrics/promql?query=count%28up%29&start=$($
 Invoke-RestMethod $uri
 ```
 
-* **返回空结果**：先在工作区直接执行相同查询。检查 AKS 是否关联了正确工作区、控制平面开关、目标组件、minimal ingestion/keep list、实际集群标签及采集延迟。`up` 存在不代表控制平面指标已经启用；不要用 `or vector(0)` 掩盖缺失数据。
+* **返回空结果**：先在工作区直接执行相同查询，并对齐求值时间。如果历史有数据而当前为空，检查最新源采样时间，区分摄取延迟与采集中断；可配置 `query_delay` 动态延迟求值，但它不保证历史补采。检查 AKS 是否关联了正确工作区、控制平面开关、目标组件、minimal ingestion/keep list、实际集群标签及采集延迟。`up` 存在不代表控制平面指标已经启用；不要用 `or vector(0)` 掩盖缺失数据。
 * **上游 HTTP 501，提示 `Metric name only support equality(=) filter`**：当前 Azure 查询接口不支持所用的指标名正则筛选。新版导出器会展开独立选择器中的固定指标名列表，更新程序需要重新编译并重启；也可以不更新程序，直接使用上述显式指标名加 `or on (__name__)` 的查询。先用单一显式指标名验证，若组合查询也被上游限制，则拆成每个 job 一个显式指标名。这不是未开启控制平面采集的证据。
 * **401/403 或令牌获取错误**：检查导出器实际使用的身份、工作区级角色分配、登录租户以及角色生效时间。导出器可能将上游认证失败作为 HTTP 502 返回，具体原因查看响应正文和日志。
 * **超时**：检查导出器到查询终结点的网络连通性，并协调 `scrape_timeout` 与 `--server.timeout.write`。不要只提高超时，应先缩小查询范围、减少标签维度。

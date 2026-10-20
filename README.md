@@ -323,7 +323,7 @@ azurerm_ratelimit{scope="subscription",subscriptionID="...",type="read"} 11999
 <a id="promql-query"></a>
 ### `/probe/metrics/promql`（PromQL）
 
-参数、身份权限、即时/范围查询、本地启动及 AKS 高级控制平面指标的 job 配置已移至独立文档：[PromQL 查询与 AKS 控制平面指标](PROMQL.md)。该端点默认输出显式时间戳：独立原始指标选择器使用源采样时间，计算表达式使用查询求值时间；Prometheus 应保留 `honor_timestamps: true`。
+参数、身份权限、即时/范围查询、本地启动及 AKS 高级控制平面指标的 job 配置已移至独立文档：[PromQL 查询与 AKS 控制平面指标](PROMQL.md)。该端点默认输出显式时间戳：独立原始指标选择器使用源采样时间，计算表达式使用查询求值时间；Prometheus 应保留 `honor_timestamps: true`。存在入库延迟时，可通过 job 参数 `query_delay: ["20m"]` 动态向前查询，表达式保留延迟后的求值时间；该参数仅适用于即时查询，不能与 `time` 或范围查询参数同时使用。
 
 <a id="probemetrics-parameters"></a>
 ### /probe/metrics 参数
