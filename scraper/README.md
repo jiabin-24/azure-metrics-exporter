@@ -39,7 +39,7 @@ scrape_configs:
 - 支持 `global.scrape_interval` / `scrape_timeout`；默认分别为 `1m` / `10s`。job 可以覆盖，两者必须为正的 Go duration，显式超时不能大于周期；继承的超时超过 job 周期时自动缩短到周期。省略全局超时时，默认超时也不超过全局周期。
 - job 名称必须非空且唯一。支持 `scheme`（`http` / `https`）、`metrics_path`（默认 `/metrics`）、`params`（值为字符串列表，可多值）和 `static_configs.targets` / `labels`。
 - target 使用 `host[:port]`，不包含协议、路径或认证信息；IPv6 使用方括号。相同 job 内 target 不可重复。
-- `params` 原样 URL 编码后发送到 exporter，适用于其所有 probe 端点；这里只请求 exporter，不直接请求 Azure。PromQL 的 `query_delay` 等规则见 [PROMQL 文档](../PROMQL.md)。
+- 默认将 `params` 原样 URL 编码后发送到 exporter；启用 `rolling_range` 的 PromQL job 会在每次请求时额外生成 `start/end/step`。这里只请求 exporter，不直接请求 Azure。PromQL 的 `query_delay` 等规则见 [PROMQL 文档](../PROMQL.md)。
 - 立即执行第一次抓取，然后按每个 job 的周期调度。不同 target 独立运行，同一 target 不重叠抓取；失败记录错误日志，下一个周期继续，绝不复用旧结果或补零。
 - 限制单次响应为 16 MiB；只接受 HTTP 200 和合法的 Prometheus 文本或本项目的指标窗口 JSON（允许空结果）。JSON 的 `source` 支持平台指标的 `azure-monitor` 和 PromQL 的 `azure-prometheus`。不跟随 HTTP 重定向。请求和响应读取均受超时与退出信号约束。
 - 原始响应及源时间戳不做修改；只支持 `honor_timestamps: true`（或省略）。job、target、静态 labels、采集时间、Content-Type 和原始响应进入 batch；两类窗口 JSON 均保留解析后的全部序列和采样点，留给后续发送逻辑使用。**静态 labels 是 batch 元数据，不会注入或改写指标，也不实现 Prometheus 的 job/instance 标签合并规则。**
@@ -95,6 +95,35 @@ PromQL 与平台指标使用相同的 `params.format: ["json"]`，无需增加�
 ```
 
 上例用于调试固定历史窗口，重复执行仍查询同一窗口；scraper 不自动改写 `start/end`。JSON 的 schemaVersion 和 name/labels/samples 结构与平台指标相同，`source` 为 `azure-prometheus`，日志中的序列数和采样点数采用同一统计方式。完整时间戳规则、指标名及标签语义见 [PromQL JSON 文档](../PROMQL.md#json-window)。
+
+### PromQL 滚动查询范围
+
+本地配置和 Kubernetes ConfigMap 的默认 PromQL job 已启用滚动范围。`rolling_range` 是 scraper 的 job 配置，不放在 `params` 中，也不会作为参数传给 exporter：
+
+```yaml
+- job_name: azure-control-plane
+  scrape_interval: 1m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/promql
+  rolling_range:
+    window: 1m
+    step: 15s
+    delay: 0s
+  params:
+    query: ["apiserver_request_total"]
+    format: ["json"]
+  static_configs:
+    - targets: ["127.0.0.1:8080"]
+```
+
+- 每次实际开始抓取时，取一次当前 UTC 时间，计算 `end = now - delay`、`start = end - window`，生成 `params.start/end/step`。按 PromQL 毫秒精度截去亚毫秒，不按整分钟或 `step` 网格取整；不会修改共享配置或前一批的查询参数。
+- `window` 默认 `1m`，独立于 `scrape_interval`，可调整为 `3m` 等；`step` 默认 `15s`，必须为正且不超过 window；`delay` 默认 `0s`，必须非负。三者均为 Go duration，精度为整毫秒。`rolling_range: {}` 启用默认值，完全省略该字段则保留原有查询行为。
+- 例如在 `2026-10-22T00:12:24Z` 抓取，默认生成 `start=2026-10-22T00:11:24Z`、`end=2026-10-22T00:12:24Z`、`step=15s`。下一次抓取重新计算。配置 `delay: 20m` 时，整个范围向过去移动 20 分钟，不是等待 20 分钟再发送。
+- 仅支持 `/probe/metrics/promql`，必须有一个非空 `params.query`；不能与 `params.start/end/step/time/query_delay` 同时配置，包括空列表或空字符串。冲突在启动时直接报错。入库延迟使用 `rolling_range.delay`，不是即时查询的 `params.query_delay`。
+- 不启用 `rolling_range` 时，原有即时查询、即时 `query_delay`、固定 `start/end/step` 和平台指标 `timespan/interval` 都保持不变。若需要固定范围或即时查询，请移除整个 `rolling_range`。
+- 范围查询包含起止端点；原始选择器还可能在多个求值点选中相同源样本。相邻窗口可能重复边界样本，且调度抖动可能产生重叠或间隙。查询周期大于 window、请求/发送耗时、暂停或失败也可能产生缺口；本功能不保证连续覆盖，不记忆上次 end、不自动补采。
+- `step` 是 PromQL 求值步长，不保证抓取上游每个原始样本。查询步长大于上游采样周期时可能跳过部分源样本；JSON 仅保证保留本次查询实际返回的全部点，不补零、不插值、不重新打时间戳。
+- 成功日志记录 `query_start/query_end/query_step`。Event Hub 消息的 `windowStart/windowEnd` 仍取实际源样本时间的最小值/最大值，可能与请求范围不同；`scrapeInterval` 仍表示抓取周期。JSON 正文结构和发送逻辑不变。
 
 ## 本地运行
 

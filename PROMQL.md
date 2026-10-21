@@ -116,7 +116,7 @@ params:
 - JSON 保留原始标签名，例如 `microsoft.resourceid`，不执行文本模式的下划线规范化。结果没有 `__name__` 时仍使用 `azure_promql_query_result`，不会自动推导业务别名。
 - `NaN` / `±Inf` 无法表示为标准 JSON number，JSON 模式返回失败，不替换成零；native histogram 样本暂不支持，出现时也明确报错。
 - `format` 是 exporter 参数，不转发给 Azure。`query_delay` 仍只支持即时查询；JSON 模式不会放宽它与 `time`、`start`、`end`、`step` 的互斥规则。
-- 这里的固定 `start/end` 适合调试历史窗口。scraper 目前原样发送配置参数，不会自动滚动更新该窗口；`format=json` 本身不提供动态窗口调度或 Event Hub 发送。
+- 这里的固定 `start/end` 适合调试历史窗口，不会自动更新。独立 scraper 可通过 job 级别的 [`rolling_range`](scraper/README.md#promql-滚动查询范围) 每次动态生成查询范围，并将 JSON 发送到 Event Hub；`rolling_range` 不是 exporter HTTP 参数，也不能与固定范围或即时查询时间参数同时使用。
 - Prometheus 本身不能将此 JSON 当作抓取文本；应由 [scraper](scraper/README.md#promql-json-采集) 等客户端读取。原有 Prometheus jobs 不添加 `format=json` 即可保持不变。
 
 ### 入库延迟与动态查询时间

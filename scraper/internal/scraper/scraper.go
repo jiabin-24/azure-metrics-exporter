@@ -94,6 +94,7 @@ func (s *Scraper) runTarget(ctx context.Context, job Job, target string, labels 
 }
 
 func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map[string]string) error {
+	job.Params = job.paramsAt(time.Now())
 	deliveryCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(job.Timeout))
 	defer cancel()
@@ -143,6 +144,10 @@ func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map
 		return fmt.Errorf("expected application/json for format=json, received %q", batch.ContentType)
 	}
 	logger := s.Logger
+	if job.RollingRange != nil {
+		logger = logger.With("query_start", job.Params["start"][0],
+			"query_end", job.Params["end"][0], "query_step", job.Params["step"][0])
+	}
 	if mediaType == "application/json" {
 		batch.Window, err = metricdata.Decode(body)
 		if err != nil {

@@ -14,11 +14,14 @@ data:
       - job_name: azure-control-plane
         metrics_path: /probe/metrics/promql
         honor_timestamps: true
+        rolling_range:
+          window: 1m
+          step: 15s
+          delay: 0s
         params:
           query: ["apiserver_request_total"]
           format: ["json"]
-          # Set query_delay to match the workspace ingestion delay if necessary.
-          # query_delay: ["20m"]
+          # For ingestion lag, set rolling_range.delay; do not add params.query_delay.
         static_configs:
           - targets: ["azure-metrics:8080"]
             labels:

@@ -2,6 +2,7 @@ package scraper
 
 import (
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
@@ -16,16 +17,32 @@ import (
 type Duration time.Duration
 
 func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	value, err := decodeDuration(unmarshal, false)
+	*d = Duration(value)
+	return err
+}
+
+type NonNegativeDuration time.Duration
+
+func (d *NonNegativeDuration) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	value, err := decodeDuration(unmarshal, true)
+	*d = NonNegativeDuration(value)
+	return err
+}
+
+func decodeDuration(unmarshal func(interface{}) error, allowZero bool) (time.Duration, error) {
 	var value string
 	if err := unmarshal(&value); err != nil {
-		return err
+		return 0, err
 	}
 	duration, err := time.ParseDuration(value)
-	if err != nil || duration <= 0 {
-		return fmt.Errorf("duration must be positive with a unit: %q", value)
+	if err != nil || duration < 0 || (!allowZero && duration == 0) {
+		if allowZero {
+			return 0, fmt.Errorf("duration must be nonnegative with a unit: %q", value)
+		}
+		return 0, fmt.Errorf("duration must be positive with a unit: %q", value)
 	}
-	*d = Duration(duration)
-	return nil
+	return duration, nil
 }
 
 type Timing struct {
@@ -53,6 +70,13 @@ type Job struct {
 	Params          map[string][]string `yaml:"params"`
 	HonorTimestamps *bool               `yaml:"honor_timestamps"`
 	StaticConfigs   []StaticConfig      `yaml:"static_configs"`
+	RollingRange    *RollingRange       `yaml:"rolling_range"`
+}
+
+type RollingRange struct {
+	Window Duration            `yaml:"window"`
+	Step   Duration            `yaml:"step"`
+	Delay  NonNegativeDuration `yaml:"delay"`
 }
 
 type StaticConfig struct {
@@ -124,6 +148,32 @@ func ParseConfig(data []byte) (*Config, error) {
 		if job.MetricsPath == "" {
 			job.MetricsPath = "/metrics"
 		}
+		if job.RollingRange != nil {
+			if job.MetricsPath != config.ProbeMetricsPromQLUrl ||
+				len(job.Params["query"]) != 1 || job.Params["query"][0] == "" {
+				return nil, fmt.Errorf("job %q: rolling_range requires /probe/metrics/promql and exactly one query", job.Name)
+			}
+			for _, key := range []string{"start", "end", "step", "time", "query_delay"} {
+				if _, exists := job.Params[key]; exists {
+					return nil, fmt.Errorf("job %q: rolling_range cannot be combined with params.%s", job.Name, key)
+				}
+			}
+			rolling := job.RollingRange
+			if rolling.Window == 0 {
+				rolling.Window = Duration(time.Minute)
+			}
+			if rolling.Step == 0 {
+				rolling.Step = Duration(15 * time.Second)
+			}
+			if time.Duration(rolling.Window)%time.Millisecond != 0 ||
+				time.Duration(rolling.Step)%time.Millisecond != 0 ||
+				time.Duration(rolling.Delay)%time.Millisecond != 0 {
+				return nil, fmt.Errorf("job %q: rolling_range durations must use whole milliseconds", job.Name)
+			}
+			if rolling.Step > rolling.Window {
+				return nil, fmt.Errorf("job %q: rolling_range.step must not exceed window", job.Name)
+			}
+		}
 		if cfg.EventHub != nil {
 			source := eventHubSource(job.MetricsPath)
 			if source == "" || len(job.Params["format"]) != 1 || job.Params["format"][0] != "json" {
@@ -180,6 +230,19 @@ func (j Job) targetURL(target string) string {
 	u.Path, u.RawPath = path.Path, path.RawPath
 	u.RawQuery = url.Values(j.Params).Encode()
 	return u.String()
+}
+
+func (j Job) paramsAt(now time.Time) map[string][]string {
+	if j.RollingRange == nil {
+		return j.Params
+	}
+	params := maps.Clone(j.Params)
+	end := now.UTC().Add(-time.Duration(j.RollingRange.Delay)).Truncate(time.Millisecond)
+	start := end.Add(-time.Duration(j.RollingRange.Window))
+	params["start"] = []string{start.Format(time.RFC3339Nano)}
+	params["end"] = []string{end.Format(time.RFC3339Nano)}
+	params["step"] = []string{time.Duration(j.RollingRange.Step).String()}
+	return params
 }
 
 func eventHubSource(path string) string {

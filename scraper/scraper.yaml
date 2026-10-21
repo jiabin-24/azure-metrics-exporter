@@ -10,15 +10,16 @@ scrape_configs:
   - job_name: azure-control-plane
     metrics_path: /probe/metrics/promql
     honor_timestamps: true
+    # 每次抓取查询 [当前时间-delay-window, 当前时间-delay]，不按整分钟取整。
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
     params:
       query: ["apiserver_request_total"]
-      # 返回统一的窗口 JSON；不指定范围时仍为即时查询。
+      # 返回完整窗口及源采样时间。
       format: ["json"]
-      # 获取历史窗口时，取消下面三项注释并调整时间；固定范围不会随抓取自动滚动。
-      # start: ["2026-10-21T14:00:00Z"]
-      # end: ["2026-10-21T14:03:00Z"]
-      # step: ["15s"]
-      # 即时查询可按工作区入库延迟设置 query_delay；不能与 start/end/step 同时使用。
+      # 即时查询：先移除 rolling_range；query_delay 不能与范围参数同时使用。
       # query_delay: ["20m"]
     static_configs:
       - targets: ["127.0.0.1:8080"]
