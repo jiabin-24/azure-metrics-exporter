@@ -8,16 +8,25 @@ scrape_configs:
     honor_timestamps: true
     params:
       query: ["apiserver_request_total"]
-      # Set query_delay to match the workspace ingestion delay if necessary.
+      # 返回统一的窗口 JSON；不指定范围时仍为即时查询。
+      format: ["json"]
+      # 获取历史窗口时，取消下面三项注释并调整时间；固定范围不会随抓取自动滚动。
+      # start: ["2026-10-21T14:00:00Z"]
+      # end: ["2026-10-21T14:03:00Z"]
+      # step: ["15s"]
+      # 即时查询可按工作区入库延迟设置 query_delay；不能与 start/end/step 同时使用。
       # query_delay: ["20m"]
     static_configs:
       - targets: ["127.0.0.1:8080"]
         labels:
           environment: development
 
-  - job_name: exporter-self
-    scrape_interval: 30s
-    scrape_timeout: 5s
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["127.0.0.1:8080"]
+  # - job_name: exporter-self
+  #   scrape_interval: 30s
+  #   scrape_timeout: 5s
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ["127.0.0.1:8080"]
+
+  # 平台指标接口也使用 format: ["json"]，示例见 README.md。
+  # 启用平台指标任务前，需要配置订阅及资源 ID。

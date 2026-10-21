@@ -2,7 +2,7 @@
 
 [返回项目 README](../README.md)
 
-`azure-metrics-scraper` 是与 exporter 分开运行的 Go 进程，通过 HTTP 定时拉取 exporter 返回的 Prometheus 文本，不需要部署 Prometheus 服务。
+`azure-metrics-scraper` 是与 exporter 分开运行的 Go 进程，通过 HTTP 定时拉取 exporter 返回的 Prometheus 文本，或平台指标 / PromQL 窗口 JSON，不需要部署 Prometheus 服务。
 
 采集器的代码、测试、配置文件、Dockerfile、部署清单和说明统一放在本目录，与 exporter 共用仓库根目录的 Go module，但独立构建镜像。以下命令均从 `scraper` 目录执行；若当前在仓库根目录，先执行 `cd .\scraper`。
 
@@ -41,12 +41,60 @@ scrape_configs:
 - target 使用 `host[:port]`，不包含协议、路径或认证信息；IPv6 使用方括号。相同 job 内 target 不可重复。
 - `params` 原样 URL 编码后发送到 exporter，适用于其所有 probe 端点；这里只请求 exporter，不直接请求 Azure。PromQL 的 `query_delay` 等规则见 [PROMQL 文档](../PROMQL.md)。
 - 立即执行第一次抓取，然后按每个 job 的周期调度。不同 target 独立运行，同一 target 不重叠抓取；失败记录错误日志，下一个周期继续，绝不复用旧结果或补零。
-- 限制单次响应为 16 MiB；只接受 HTTP 200 和合法的 Prometheus 文本格式（允许空结果）。不跟随 HTTP 重定向。请求和响应读取均受超时与退出信号约束。
-- 原始指标文本及其中的显式时间戳不做修改；只支持 `honor_timestamps: true`（或省略）。job、target、静态 labels、采集时间、Content-Type 和原始文本进入 batch，留给后续发送逻辑使用。**labels 是 batch 元数据，不会注入或改写指标文本，也不实现 Prometheus 的 job/instance 标签合并规则。**
+- 限制单次响应为 16 MiB；只接受 HTTP 200 和合法的 Prometheus 文本或本项目的指标窗口 JSON（允许空结果）。JSON 的 `source` 支持平台指标的 `azure-monitor` 和 PromQL 的 `azure-prometheus`。不跟随 HTTP 重定向。请求和响应读取均受超时与退出信号约束。
+- 原始响应及源时间戳不做修改；只支持 `honor_timestamps: true`（或省略）。job、target、静态 labels、采集时间、Content-Type 和原始响应进入 batch；两类窗口 JSON 均保留解析后的全部序列和采样点，留给后续发送逻辑使用。**静态 labels 是 batch 元数据，不会注入或改写指标，也不实现 Prometheus 的 job/instance 标签合并规则。**
 - 不实现服务发现、relabel、认证配置、本地 PromQL 计算、TSDB、历史补采或完整 OpenMetrics/protobuf 协议。未知配置字段、重复 YAML 键、非法周期等会在启动时直接报错退出，不会静默忽略。
 - 配置在启动时读取，不支持热加载。本地修改后重启进程；Kubernetes 修改 ConfigMap 后执行 `apply` 和 `rollout restart`，无需重新构建镜像。
 
 对于 `30s` probe 抓取超时，应协调 exporter 的写超时，例如设置 `--server.timeout.write=120s`，避免 exporter 默认 `10s` 提前结束响应。
+
+## 平台指标 JSON 采集
+
+在原有平台指标 job 中增加 `params.format: ["json"]` 即可，不需要新增调度框架或在 scraper 中累积历史窗口：
+
+```yaml
+- job_name: azure-platform-window
+  scrape_interval: 3m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/resource
+  params:
+    subscription: ["<subscription-id>"]
+    target: ["/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.ContainerService/managedClusters/<cluster>"]
+    metric: ["node_cpu_usage_percentage"]
+    aggregation: ["average"]
+    timespan: ["PT3M"]
+    interval: ["PT1M"]
+    format: ["json"]
+  static_configs:
+    - targets: ["127.0.0.1:8080"]
+```
+
+将此 job 加入本地配置的 `scrape_configs`，或 Kubernetes ConfigMap 的对应位置，替换订阅和资源 ID；在 Kubernetes 中 target 地址改为 exporter Service。原有 PromQL 和 `/metrics` job 不受影响。不要把含占位符的 job 直接用于生产。
+
+scraper 为 `format=json` 请求发送 `Accept: application/json`，校验响应 Content-Type、schemaVersion、source、序列结构和采样点。若 exporter 仍返回旧的文本响应，会明确报错，不静默退回单点模式。JSON 成功日志额外记录 `series`、`samples`；`metric_families` 为不同输出指标名的数量，不是序列或采样点数量。batch 同时保留原始 JSON 和解析后的窗口，不丢弃历史点。
+
+这仍然只采集 exporter 已返回的窗口，不提供持久化、历史补采或 Event Hub 发送。完整接口参数和字段约定见[平台指标 JSON](../README.md#platform-window-json)。不会把平台响应自动转换成 AKS PromQL 业务导出文件。
+
+## PromQL JSON 采集
+
+PromQL 与平台指标使用相同的 `params.format: ["json"]`，无需增加新的 scraper 输出格式选项。仅查询参数按数据源区分：平台指标使用 `timespan/interval`，PromQL 使用 `start/end/step`。
+
+```yaml
+- job_name: azure-control-plane-window
+  scrape_interval: 3m
+  scrape_timeout: 30s
+  metrics_path: /probe/metrics/promql
+  params:
+    query: ['sum(rate(apiserver_request_total{cluster="prod"}[5m])) by (cluster, code)']
+    start: ["2026-10-21T12:00:00Z"]
+    end: ["2026-10-21T12:03:00Z"]
+    step: ["15s"]
+    format: ["json"]
+  static_configs:
+    - targets: ["127.0.0.1:8080"]
+```
+
+上例用于调试固定历史窗口，重复执行仍查询同一窗口；scraper 不自动改写 `start/end`。JSON 的 schemaVersion 和 name/labels/samples 结构与平台指标相同，`source` 为 `azure-prometheus`，日志中的序列数和采样点数采用同一统计方式。完整时间戳规则、指标名及标签语义见 [PromQL JSON 文档](../PROMQL.md#json-window)。
 
 ## 本地运行
 

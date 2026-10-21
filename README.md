@@ -24,6 +24,7 @@
     + [/probe/metrics/list 参数](#probemetricslist-parameters)
     + [/probe/metrics/scrape 参数](#probemetricsscrape-parameters)
     + [/probe/metrics/promql（PromQL）](PROMQL.md)
+    + [平台指标完整时间窗口 JSON](#platform-window-json)
 * [Prometheus 配置示例](#prometheus-configuration-examples)
     * [Redis](#Redis)
     * [VirtualNetworkGateways](#virtualnetworkgateways)
@@ -321,6 +322,67 @@ azurerm_ratelimit{scope="subscription",subscriptionID="...",type="read"} 11999
 | `/probe/metrics/scrape`        | 探测资源列表的指标，并从资源标记读取配置（每个资源查询一次；参见 `azurerm_resource_metric`）                                          |
 | `/probe/metrics/resourcegraph` | 基于 Kusto 查询和 Resource Graph API 探测资源列表的指标（每个资源查询一次）                                                          |
 | `/probe/metrics/promql`        | 将 PromQL 即时或范围查询转发到 Azure Monitor 工作区，并以 Prometheus 指标格式返回结果                                               |
+
+<a id="platform-window-json"></a>
+### 平台指标完整时间窗口 JSON
+
+原有 `/probe/metrics`、`/probe/metrics/resource`、`/probe/metrics/list`、`/probe/metrics/scrape`、`/probe/metrics/resourcegraph` 接口支持可选参数 `format=json`。省略该参数或使用 `format=prometheus` 时，原有 Prometheus 文本输出和每组标签仅输出一个点的行为保持不变。`format` 只允许一个值，空值、重复值或其他格式返回 HTTP 400。
+
+JSON 模式使用相同的 Azure Metrics API、资源发现、指标模板、聚合、维度和标签配置，但在写入 Gauge 之前输出窗口内的全部数据点：
+
+```json
+{
+  "schemaVersion": "1.0",
+  "source": "azure-monitor",
+  "metrics": [
+    {
+      "name": "azurerm_resource_metric",
+      "labels": {
+        "metric": "node_cpu_usage_percentage",
+        "aggregation": "average",
+        "resourceID": "/subscriptions/.../managedClusters/example"
+      },
+      "samples": [
+        ["2026-10-21T14:00:00Z", 20.5],
+        ["2026-10-21T14:01:00Z", 25.0],
+        ["2026-10-21T14:02:00Z", 22.5]
+      ]
+    }
+  ]
+}
+```
+
+示例中省略了部分标签。按完整的“输出指标名 + 标签组合”分组，聚合方式、资源及维度不同的序列不会混合。序列排序确定，各序列的样本按源时间升序输出；保留全部返回点，不补零、不插值、不改写源时间戳。时间输出为 UTC RFC3339，可保留亚秒精度；数值为 JSON number。无数据时 `metrics` 为 `[]`。
+
+例如在 PowerShell 查询一个明确的三分钟窗口：
+
+```powershell
+$subscription = '<subscription-id>'
+$resourceId = '/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.ContainerService/managedClusters/<cluster>'
+$end = [DateTime]::UtcNow
+$start = $end.AddMinutes(-3)
+$params = @{
+    subscription = $subscription
+    target = $resourceId
+    metric = 'node_cpu_usage_percentage'
+    aggregation = 'average'
+    timespan = $start.ToString('o') + '/' + $end.ToString('o')
+    interval = 'PT1M'
+    format = 'json'
+}
+$query = ($params.GetEnumerator() | ForEach-Object {
+    [Uri]::EscapeDataString($_.Key) + '=' + [Uri]::EscapeDataString($_.Value)
+}) -join '&'
+Invoke-RestMethod "http://127.0.0.1:8080/probe/metrics/resource?$query"
+```
+
+注意：
+
+- `timespan`、`interval` 沿用原接口语义；实际时间粒度和可用点数由 Azure 决定。Azure 客户端仍允许自动调整粒度，因此标签中的 `interval` 是请求值，不能保证每 15 秒都有一个真实采样点。
+- 缺失的聚合值不补零；缺失源时间戳、非有限值（`NaN` / `±Inf`）、Azure 查询或资源发现失败时，JSON 模式返回失败，不把部分结果作为完整窗口返回。采集失败通常为 HTTP 502，超时为 HTTP 504。
+- JSON 模式继续支持已有指标缓存，缓存整段窗口且保留源时间。缓存键包含请求 URL，包含 `format`；启用缓存时，重复请求可能返回已有窗口，不代表 Azure 已刷新数据。失败的采集不进入 JSON 指标缓存。
+- 响应不是 AKS PromQL 导出文件的完整业务 schema：不伪造 `promql`、cluster 或 region 等字段，也不会产生平台 API 没有的指标。`/probe/metrics/promql` 也使用相同的 `format=json` 和字段结构，`source` 为 `azure-prometheus`；其默认文本模式仍只输出每条序列的最后一点，详见[PromQL JSON 窗口](PROMQL.md#json-window)。
+- 这是独立 JSON 输出，不能作为 Prometheus 的文本抓取目标；[scraper](scraper/README.md#平台指标-json-采集) 已支持读取它。较大窗口请协调客户端和 exporter 写超时，避免默认 `10s` 写超时提前断开响应。
 
 <a id="promql-query"></a>
 ### `/probe/metrics/promql`（PromQL）

@@ -141,6 +141,7 @@ func (sd *AzureServiceDiscovery) FindSubscriptionResources(subscriptionId, filte
 			)
 		}
 	} else {
+		sd.prober.recordCollectionError(err)
 		sd.prober.logger.Error(err.Error())
 		return
 	}
@@ -168,6 +169,7 @@ func (sd *AzureServiceDiscovery) FindSubscriptionResourcesWithScrapeTags(ctx con
 			}
 		}
 	} else {
+		sd.prober.recordCollectionError(err)
 		sd.prober.logger.Error(err.Error())
 		return
 	}

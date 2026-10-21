@@ -13,6 +13,8 @@ data:
         honor_timestamps: true
         params:
           query: ["apiserver_request_total"]
+          # For JSON, uncomment format; add start/end/step for a fixed range.
+          # format: ["json"]
           # Set query_delay to match the workspace ingestion delay if necessary.
           # query_delay: ["20m"]
         static_configs:
@@ -25,6 +27,7 @@ data:
         metrics_path: /metrics
         static_configs:
           - targets: ["azure-metrics:8080"]
+      # Platform window jobs may use params.format: ["json"]; see ../README.md.
 ---
 apiVersion: apps/v1
 kind: Deployment

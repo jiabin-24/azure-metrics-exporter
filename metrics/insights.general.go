@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ type (
 func (r *AzureInsightBaseMetricsResult) sendDataPoints(channel chan<- PrometheusMetricResult, labels prometheus.Labels, data []*armmonitor.MetricValue) {
 	for _, point := range data {
 		if point.TimeStamp == nil || point.TimeStamp.IsZero() {
+			r.prober.recordCollectionError(fmt.Errorf("Azure metric data point has no source timestamp"))
 			r.prober.logger.Error("Azure metric data point has no source timestamp", slog.Any("labels", labels))
 			continue
 		}
@@ -32,11 +35,33 @@ func (r *AzureInsightBaseMetricsResult) sendDataPoints(channel chan<- Prometheus
 			{"count", point.Count},
 		} {
 			if aggregation.value != nil {
+				if r.prober.settings.Format == "json" &&
+					(math.IsNaN(*aggregation.value) || math.IsInf(*aggregation.value, 0)) {
+					err := fmt.Errorf("Azure metric has a non-finite %s value", aggregation.name)
+					r.prober.recordCollectionError(err)
+					r.prober.logger.Error(err.Error())
+					continue
+				}
 				labels["aggregation"] = aggregation.name
 				channel <- r.buildMetric(labels, *aggregation.value, *point.TimeStamp)
 			}
 		}
 	}
+}
+
+func (r *AzureInsightBaseMetricsResult) metricFailed(errorCode, errorMessage *string) bool {
+	if r.prober.settings.Format != "json" || errorCode == nil ||
+		*errorCode == "" || strings.EqualFold(*errorCode, "Success") {
+		return false
+	}
+	message := ""
+	if errorMessage != nil {
+		message = *errorMessage
+	}
+	err := fmt.Errorf("Azure metric query failed (%s): %s", *errorCode, message)
+	r.prober.recordCollectionError(err)
+	r.prober.logger.Error(err.Error())
+	return true
 }
 
 func (r *AzureInsightBaseMetricsResult) buildMetric(labels prometheus.Labels, value float64, timestamp time.Time) (metric PrometheusMetricResult) {

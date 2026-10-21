@@ -26,6 +26,9 @@ func (r *AzureInsightMetricsResult) SendMetricToChannel(channel chan<- Prometheu
 		// fmt.Println(string(data))
 
 		for _, metric := range r.Result.Value {
+			if r.metricFailed(metric.ErrorCode, metric.ErrorMessage) {
+				continue
+			}
 			if metric.Timeseries != nil {
 				for _, timeseries := range metric.Timeseries {
 					if timeseries.Data != nil {

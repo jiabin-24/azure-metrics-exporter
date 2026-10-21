@@ -2,12 +2,13 @@
 
 [返回 README](README.md)
 
-本项目的 `/probe/metrics/promql` 端点将 PromQL 即时或范围查询转发到 Azure Monitor 工作区，并把结果转换为 Prometheus 抓取格式。它适用于通过 Azure Monitor 托管 Prometheus 收集的 AKS 控制平面指标。
+本项目的 `/probe/metrics/promql` 端点将 PromQL 即时或范围查询转发到 Azure Monitor 工作区，默认转换为 Prometheus 抓取格式；与平台指标接口一致，可通过 `format=json` 输出完整 JSON 时间窗口。它适用于通过 Azure Monitor 托管 Prometheus 收集的 AKS 控制平面指标。
 
 目录：
 
 * [查询终结点与权限](#endpoint-and-auth)
 * [查询参数与结果](#query-parameters)
+* [完整时间窗口 JSON](#json-window)
 * [AKS 高级控制平面指标](#aks-control-plane)
     * [etcd 专项指标与 job](#etcd-metrics)
 * [Windows PowerShell 本地启动](#local-startup)
@@ -59,6 +60,7 @@ AZURE_PROMETHEUS_QUERY_ENDPOINT=https://<workspace>.<region>.prometheus.monitor.
 | `start` | 范围查询必填 | 开始时间，支持 RFC3339 时间或 Unix 时间戳（秒） |
 | `end` | 范围查询必填 | 结束时间，格式与 `start` 相同 |
 | `step` | 范围查询必填 | 查询步长，支持秒数或时间长度，例如 `60`、`1m` |
+| `format` | 否 | 与平台指标接口一致：省略或 `prometheus` 输出原有文本，`json` 输出完整时间窗口。只允许一个非空值，其他值或重复参数返回 HTTP 400 |
 
 不传 `start`、`end`、`step` 时使用 `/api/v1/query` 即时查询；传入其中任一参数时，必须同时提供三个非空参数，并使用 `/api/v1/query_range` 范围查询。参数格式、时间先后顺序和步长有效性由上游 Prometheus API 校验，错误会返回给调用方。
 
@@ -72,7 +74,50 @@ params:
   step: ["1m"]
 ```
 
-范围查询返回矩阵时，每条时间序列仍只导出上游返回的最后一个数据点，不回填整段历史数据。输出默认携带显式时间戳（Unix 毫秒），不再让 Prometheus 使用本次抓取时间。固定时间范围被重复抓取时，会重复输出相同时间点，不能将其用于持续监控当前状态。
+默认文本模式下，范围查询返回矩阵时，每条时间序列仍只导出上游返回的最后一个数据点，不回填整段历史数据。文本输出默认携带显式时间戳（Unix 毫秒），不再让 Prometheus 使用本次抓取时间。`format=json` 则保留全部返回点，见下节。固定时间范围被重复抓取时，会重复输出相同时间点，不能将其用于持续监控当前状态。
+
+<a id="json-window"></a>
+### 完整时间窗口 JSON
+
+与平台指标接口使用完全相同的配置方式，在 scraper job 的 `params` 中设置：
+
+```yaml
+params:
+  query: ['sum(rate(apiserver_request_total{cluster="prod"}[5m])) by (cluster, code)']
+  start: ["2026-10-21T12:00:00Z"]
+  end: ["2026-10-21T12:03:00Z"]
+  step: ["15s"]
+  format: ["json"]
+```
+
+返回 `Content-Type: application/json; charset=utf-8`，字段结构与平台 JSON 一致，`source` 用于区分数据源：
+
+```json
+{
+  "schemaVersion": "1.0",
+  "source": "azure-prometheus",
+  "metrics": [
+    {
+      "name": "azure_promql_query_result",
+      "labels": {"cluster": "prod", "code": "200"},
+      "samples": [
+        ["2026-10-21T12:00:00Z", 12.5],
+        ["2026-10-21T12:00:15Z", 13.0]
+      ]
+    }
+  ]
+}
+```
+
+示例仅展示两个采样点。范围查询保留每条序列的全部浮点采样点，即时查询的 vector/scalar 返回单点，原始范围向量的 matrix 也保留全部点；无数据时 `metrics` 为 `[]`。各序列的样本按时间升序输出，不补零、不插值，JSON 数值不是字符串。
+
+- 时间规则与原接口一致：独立原始选择器额外查询 `timestamp(...)`，按“指标名 + 标签 + 求值时间”逐点匹配源时间；表达式保留上游求值时间。源时间匹配失败会报错，不静默丢点或回退到本地时间。
+- 原始样本被多个求值步选中时，JSON 中可能出现重复的源时间戳；不会将其重打为规则的 15 秒网格。时间输出为 UTC RFC3339，PromQL 时间解析精度仍为毫秒。
+- JSON 保留原始标签名，例如 `microsoft.resourceid`，不执行文本模式的下划线规范化。结果没有 `__name__` 时仍使用 `azure_promql_query_result`，不会自动推导业务别名。
+- `NaN` / `±Inf` 无法表示为标准 JSON number，JSON 模式返回失败，不替换成零；native histogram 样本暂不支持，出现时也明确报错。
+- `format` 是 exporter 参数，不转发给 Azure。`query_delay` 仍只支持即时查询；JSON 模式不会放宽它与 `time`、`start`、`end`、`step` 的互斥规则。
+- 这里的固定 `start/end` 适合调试历史窗口。scraper 目前原样发送配置参数，不会自动滚动更新该窗口；`format=json` 本身不提供动态窗口调度或 Event Hub 发送。
+- Prometheus 本身不能将此 JSON 当作抓取文本；应由 [scraper](scraper/README.md#promql-json-采集) 等客户端读取。原有 Prometheus jobs 不添加 `format=json` 即可保持不变。
 
 ### 入库延迟与动态查询时间
 
@@ -103,7 +148,7 @@ Azure 数据可能尚未入库，导致当前即时查询为空，而历史范�
 
 ### 采样时间（默认启用）
 
-默认使用上游时间，而不是本地抓取时间。Prometheus 保持 `honor_timestamps: true`（默认值）即可。
+默认使用上游时间，而不是本地抓取时间。以下说明针对默认文本模式，Prometheus 保持 `honor_timestamps: true`（默认值）即可；JSON 完整窗口模式见[上节](#json-window)。
 
 | 查询形式 | 输出时间 |
 |----------|----------|

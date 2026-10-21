@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+
+	"github.com/webdevops/azure-metrics-exporter/internal/metricdata"
 )
 
 const MaxBodyBytes = 16 << 20
@@ -24,6 +27,7 @@ type Batch struct {
 	ContentType string
 	Metrics     []byte
 	Families    int
+	Window      *metricdata.Window
 }
 
 type Sink func(context.Context, Batch) error
@@ -92,7 +96,12 @@ func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map
 	if err != nil {
 		return fmt.Errorf("create scrape request: %w", err)
 	}
-	req.Header.Set("Accept", `text/plain; version=0.0.4; charset=utf-8`)
+	expectJSON := len(job.Params["format"]) == 1 && job.Params["format"][0] == "json"
+	if expectJSON {
+		req.Header.Set("Accept", "application/json")
+	} else {
+		req.Header.Set("Accept", `text/plain; version=0.0.4; charset=utf-8`)
+	}
 	req.Header.Set("User-Agent", "azure-metrics-scraper")
 	resp, err := s.Client.Do(req)
 	if err != nil {
@@ -109,20 +118,47 @@ func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map
 	if len(body) > MaxBodyBytes {
 		return fmt.Errorf("metrics response exceeds %d bytes", MaxBodyBytes)
 	}
-	parser := expfmt.NewTextParser(model.UTF8Validation)
-	families, err := parser.TextToMetricFamilies(bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("invalid Prometheus text response: %w", err)
-	}
 	batch := Batch{
 		Job: job.Name, Target: target, Labels: labels, ScrapedAt: time.Now().UTC(),
-		ContentType: resp.Header.Get("Content-Type"), Metrics: body, Families: len(families),
+		ContentType: resp.Header.Get("Content-Type"), Metrics: body,
+	}
+	mediaType := ""
+	if batch.ContentType != "" {
+		mediaType, _, err = mime.ParseMediaType(batch.ContentType)
+		if err != nil {
+			return fmt.Errorf("invalid metrics Content-Type: %w", err)
+		}
+	}
+	if expectJSON && mediaType != "application/json" {
+		return fmt.Errorf("expected application/json for format=json, received %q", batch.ContentType)
+	}
+	logger := s.Logger
+	if mediaType == "application/json" {
+		batch.Window, err = metricdata.Decode(body)
+		if err != nil {
+			return err
+		}
+		names := make(map[string]bool)
+		samples := 0
+		for _, series := range batch.Window.Metrics {
+			names[series.Name] = true
+			samples += len(series.Samples)
+		}
+		batch.Families = len(names)
+		logger = logger.With("series", len(batch.Window.Metrics), "samples", samples)
+	} else {
+		parser := expfmt.NewTextParser(model.UTF8Validation)
+		families, err := parser.TextToMetricFamilies(bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("invalid Prometheus text response: %w", err)
+		}
+		batch.Families = len(families)
 	}
 	if err := s.Sink(ctx, batch); err != nil {
 		return fmt.Errorf("deliver scraped metrics: %w", err)
 	}
-	s.Logger.Info("scrape completed", "job", job.Name, "target", target,
-		"metric_families", len(families), "bytes", len(body))
+	logger.Info("scrape completed", "job", job.Name, "target", target,
+		"metric_families", batch.Families, "bytes", len(body))
 	return nil
 }
 

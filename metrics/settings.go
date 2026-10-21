@@ -10,6 +10,7 @@ import (
 	iso8601 "github.com/channelmeter/iso8601duration"
 
 	"github.com/webdevops/azure-metrics-exporter/config"
+	"github.com/webdevops/azure-metrics-exporter/internal/metricdata"
 )
 
 const (
@@ -19,6 +20,7 @@ const (
 type (
 	RequestMetricSettings struct {
 		Name            string
+		Format          string
 		Subscriptions   []string
 		ResourceType    string
 		Filter          string
@@ -75,6 +77,12 @@ func NewRequestMetricSettings(r *http.Request, opts config.Opts) (RequestMetricS
 	}
 
 	params := r.URL.Query()
+
+	format, err := metricdata.ParseFormat(params)
+	if err != nil {
+		return ret, err
+	}
+	ret.Format = format
 
 	// param name
 	ret.Name = paramsGetWithDefault(params, "name", PrometheusMetricNameDefault)

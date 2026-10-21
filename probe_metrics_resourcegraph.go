@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/webdevops/azure-metrics-exporter/config"
 	"github.com/webdevops/azure-metrics-exporter/metrics"
@@ -31,7 +30,7 @@ func probeMetricsResourceGraphHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds*float64(time.Second)))
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutSeconds*float64(time.Second)))
 	defer cancel()
 	r = r.WithContext(ctx)
 
@@ -99,13 +98,12 @@ func probeMetricsResourceGraphHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
-	h.ServeHTTP(w, r)
+	status := prober.WriteResponse(w, r)
 
 	latency := time.Since(startTime)
 	contextLogger.With(
 		slog.String("method", r.Method),
-		slog.Int("status", http.StatusOK),
+		slog.Int("status", status),
 		slog.Duration("latency", latency),
 	).Debug("request handled")
 }

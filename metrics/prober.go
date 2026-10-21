@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
@@ -53,7 +54,9 @@ type (
 
 		targets map[string][]MetricProbeTarget
 
-		metricList *MetricList
+		metricList        *MetricList
+		collectionErrorMu sync.Mutex
+		collectionErr     error
 
 		prometheus struct {
 			registry *prometheus.Registry
@@ -124,6 +127,7 @@ func (p *MetricProber) AddTarget(targets ...MetricProbeTarget) {
 	for _, target := range targets {
 		resourceInfo, err := armclient.ParseResourceId(target.ResourceId)
 		if err != nil {
+			p.recordCollectionError(err)
 			p.logger.Warn("unable to parse resource id", slog.Any("error", err.Error()))
 			continue
 		}
@@ -152,6 +156,9 @@ func (p *MetricProber) FetchFromCache() bool {
 }
 
 func (p *MetricProber) SaveToCache() {
+	if p.settings.Format == "json" && p.collectionError() != nil {
+		return
+	}
 	if p.metricsCache.cache == nil {
 		return
 	}
@@ -181,8 +188,10 @@ func (p *MetricProber) collectMetricsFromSubscriptions() {
 	subscriptionIterator.SetConcurrency(p.Conf.Prober.ConcurrencySubscription)
 
 	go func() {
+		defer close(metricsChannel)
 		regions, err := p.discoverResourceRegions()
 		if err != nil {
+			p.recordCollectionError(err)
 			p.logger.Error("error getting subscription locations", slog.Any("error", err))
 			return
 		}
@@ -193,6 +202,7 @@ func (p *MetricProber) collectMetricsFromSubscriptions() {
 			for _, region := range subscriptionRegions {
 				client, err := p.MetricsClient(*subscription.SubscriptionID)
 				if err != nil {
+					p.recordCollectionError(err)
 					// FIXME: find a better way to report errors
 					p.logger.Error(err.Error())
 					return
@@ -237,6 +247,7 @@ func (p *MetricProber) collectMetricsFromSubscriptions() {
 
 					response, err := client.ListAtSubscriptionScope(p.ctx, region, &opts)
 					if err != nil {
+						p.recordCollectionError(err)
 						// FIXME: find a better way to report errors
 						p.logger.Error(err.Error())
 						return
@@ -257,11 +268,11 @@ func (p *MetricProber) collectMetricsFromSubscriptions() {
 			}
 		})
 		if err != nil {
+			p.recordCollectionError(err)
 			// FIXME: find a better way to report errors
 			p.logger.Error(err.Error())
 		}
 
-		close(metricsChannel)
 	}()
 
 	for result := range metricsChannel {
@@ -324,6 +335,7 @@ func (p *MetricProber) collectMetricsFromTargets() {
 				wgSubscriptionResource := sizedwaitgroup.New(p.Conf.Prober.ConcurrencySubscriptionResource)
 				client, err := p.MetricsClient(subscriptionId)
 				if err != nil {
+					p.recordCollectionError(err)
 					// FIXME: find a better way to report errors
 					p.logger.Error(err.Error())
 					return
@@ -345,6 +357,7 @@ func (p *MetricProber) collectMetricsFromTargets() {
 							if result, err := p.FetchMetricsFromTarget(client, target, metricList, target.Aggregations); err == nil {
 								result.SendMetricToChannel(metricsChannel)
 							} else {
+								p.recordCollectionError(err)
 								p.logger.With(slog.String("resourceID", target.ResourceId)).Warn(err.Error())
 							}
 						}
@@ -373,7 +386,7 @@ func (p *MetricProber) collectMetricsFromTargets() {
 }
 
 func (p *MetricProber) publishMetricList() {
-	if p.metricList == nil {
+	if p.metricList == nil || p.settings.Format == "json" {
 		return
 	}
 
