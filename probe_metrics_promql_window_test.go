@@ -85,7 +85,7 @@ func TestPromQLJSONPreservesEveryPointAndSourceTimestamp(t *testing.T) {
 		"start": {"2026-10-21T14:00:00Z"}, "end": {"2026-10-21T14:03:00Z"}, "step": {"15s"},
 	}
 	body, status, err := collectPromQLMetrics(context.Background(), server.URL, params,
-		promQLWindowCredential{}, server.Client())
+		promQLWindowCredential{}, server.Client(), nil)
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("query failed: status=%d error=%v", status, err)
 	}
@@ -110,7 +110,7 @@ func TestPromQLJSONPreservesEveryPointAndSourceTimestamp(t *testing.T) {
 	}
 	params.Set("format", "prometheus")
 	text, status, err := collectPromQLMetrics(context.Background(), server.URL, params,
-		promQLWindowCredential{}, server.Client())
+		promQLWindowCredential{}, server.Client(), nil)
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("text query failed: status=%d error=%v", status, err)
 	}
@@ -141,7 +141,7 @@ func TestPromQLJSONExpressionUsesEvaluationTime(t *testing.T) {
 		"start": {"2026-10-21T14:00:00Z"}, "end": {"2026-10-21T14:03:00Z"}, "step": {"15s"},
 	}
 	body, status, err := collectPromQLMetrics(context.Background(), server.URL, params,
-		promQLWindowCredential{}, server.Client())
+		promQLWindowCredential{}, server.Client(), nil)
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("query failed: %d %v", status, err)
 	}
@@ -181,7 +181,7 @@ func TestPromQLJSONInstantAndErrorResponses(t *testing.T) {
 			}))
 			defer server.Close()
 			body, status, err := collectPromQLMetrics(context.Background(), server.URL,
-				url.Values{"query": {"sum(up)"}, "format": {"json"}}, promQLWindowCredential{}, server.Client())
+				url.Values{"query": {"sum(up)"}, "format": {"json"}}, promQLWindowCredential{}, server.Client(), nil)
 			if status != test.status || (err == nil) != (status == http.StatusOK) {
 				t.Fatalf("unexpected result: status=%d error=%v body=%s", status, err, body)
 			}

@@ -112,7 +112,8 @@ func probeMetricsPromQLHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutSeconds*float64(time.Second)))
 	defer cancel()
 
-	metrics, statusCode, err := collectPromQLMetrics(ctx, endpoint, params, AzureClient.GetCred(), http.DefaultClient)
+	regions := &promQLRegionEnricher{resources: AzureClient, logger: contextLogger.Logger}
+	metrics, statusCode, err := collectPromQLMetrics(ctx, endpoint, params, AzureClient.GetCred(), http.DefaultClient, regions)
 	if err != nil {
 		contextLogger.With(slog.Any("error", err)).Warn("Azure Monitor PromQL query failed")
 		http.Error(w, err.Error(), statusCode)
@@ -136,6 +137,7 @@ func collectPromQLMetrics(
 	params url.Values,
 	credential azcore.TokenCredential,
 	client *http.Client,
+	regions *promQLRegionEnricher,
 ) (string, int, error) {
 	format, err := metricdata.ParseFormat(params)
 	if err != nil {
@@ -195,6 +197,9 @@ func collectPromQLMetrics(
 		}
 	}
 
+	if regions != nil {
+		regions.enrich(ctx, samples)
+	}
 	var output string
 	if allPoints {
 		output, err = renderPromQLWindow(samples)
