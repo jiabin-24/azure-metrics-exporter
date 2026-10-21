@@ -2,6 +2,7 @@ package scraper
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +23,9 @@ func TestScrapePlatformWindowEndToEnd(t *testing.T) {
 	start := time.Date(2026, 10, 21, 14, 0, 0, 123000000, time.UTC)
 	for _, node := range []string{"A", "B"} {
 		for i := range 13 {
-			list.Add("cpu", metrics.MetricRow{Labels: prometheus.Labels{"node": node, "aggregation": "average"},
+			list.Add("cpu", metrics.MetricRow{Labels: prometheus.Labels{
+				"node": node, "aggregation": "average", "resourceID": platformResourceID, "region": "eastus",
+			},
 				Value: float64(i) + 0.5, Timestamp: start.Add(time.Duration(i) * 15 * time.Second)})
 		}
 	}
@@ -45,7 +48,12 @@ func TestScrapePlatformWindowEndToEnd(t *testing.T) {
 	job.MetricsPath = "/probe/metrics/resource"
 	job.Params = map[string][]string{"format": {"json"}}
 	var got Batch
-	s := New(&Config{}, quietLogger(), func(_ context.Context, batch Batch) error { got = batch; return nil })
+	sender := &recordingSender{}
+	sink := eventHubSink(sender, quietLogger())
+	s := New(&Config{EventHub: &EventHubConfig{}}, quietLogger(), func(ctx context.Context, batch Batch) error {
+		got = batch
+		return sink(ctx, batch)
+	})
 	defer s.Client.CloseIdleConnections()
 	if err := s.Scrape(context.Background(), job, target, map[string]string{"env": "test"}); err != nil {
 		t.Fatal(err)
@@ -65,6 +73,28 @@ func TestScrapePlatformWindowEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(string(got.Metrics), `["2026-10-21T14:00:00.123Z",0.5]`) {
 		t.Fatalf("raw JSON was not preserved: %s", got.Metrics)
+	}
+	if len(sender.bodies) != 1 {
+		t.Fatalf("expected one platform event, got %d", len(sender.bodies))
+	}
+	var exported exportWindow
+	if err := json.Unmarshal(sender.bodies[0], &exported); err != nil {
+		t.Fatal(err)
+	}
+	if exported.Source != "azure-monitor" || exported.ResourceID != platformResourceID ||
+		len(exported.Metrics) != 2 || !exported.WindowStart.Equal(start) ||
+		!exported.WindowEnd.Equal(start.Add(3*time.Minute)) {
+		t.Fatalf("incorrect platform event: %+v", exported)
+	}
+	for _, series := range exported.Metrics {
+		if len(series.Samples) != 13 || series.Labels["aggregation"] != "average" || series.Labels["node"] == "" {
+			t.Fatal("Event Hub conversion lost platform dimensions or historical samples")
+		}
+		for i, point := range series.Samples {
+			if !point.Timestamp.Equal(start.Add(time.Duration(i)*15*time.Second)) || point.Value != float64(i)+0.5 {
+				t.Fatalf("Event Hub conversion modified source sample: %+v", point)
+			}
+		}
 	}
 }
 

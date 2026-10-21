@@ -223,11 +223,11 @@ func TestTargetsRunIndependentlyAndCancelRequests(t *testing.T) {
 	}
 }
 
-func TestPendingEventHubSinkExplicitlyLogsDiscard(t *testing.T) {
+func TestUnconfiguredSinkExplicitlyLogsDiscard(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	err := PendingEventHubSink(logger)(context.Background(), Batch{Job: "test", Metrics: []byte("secret_payload")})
+	err := DiscardSink(logger)(context.Background(), Batch{Job: "test", Metrics: []byte("secret_payload")})
 	if err != nil || !strings.Contains(logs.String(), "discarding batch") || strings.Contains(logs.String(), "secret_payload") {
-		t.Fatalf("unexpected TODO sink result: %v, %s", err, &logs)
+		t.Fatalf("unexpected discard sink result: %v, %s", err, &logs)
 	}
 }

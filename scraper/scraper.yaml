@@ -2,6 +2,10 @@ global:
   scrape_interval: 1m
   scrape_timeout: 30s
 
+event_hub:
+  namespace: shein-aks-metrics.servicebus.windows.net
+  name: shein-aks-metrics
+
 scrape_configs:
   - job_name: azure-control-plane
     metrics_path: /probe/metrics/promql
@@ -21,6 +25,7 @@ scrape_configs:
         labels:
           environment: development
 
+  # /metrics 文本任务仅适用于未配置 event_hub 的独立采集器。
   # - job_name: exporter-self
   #   scrape_interval: 30s
   #   scrape_timeout: 5s
@@ -28,5 +33,17 @@ scrape_configs:
   #   static_configs:
   #     - targets: ["127.0.0.1:8080"]
 
-  # 平台指标接口也使用 format: ["json"]，示例见 README.md。
-  # 启用平台指标任务前，需要配置订阅及资源 ID。
+  # 平台指标可与上述 PromQL 任务推送到同一 Event Hub。
+  # 填写真实订阅及资源 ID 后再取消注释；其他平台端点示例见 README.md。
+  # - job_name: azure-platform-window
+  #   metrics_path: /probe/metrics/resource
+  #   params:
+  #     subscription: ["<subscription-id>"]
+  #     target: ["/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.Compute/virtualMachines/<vm>"]
+  #     metric: ["Percentage CPU"]
+  #     aggregation: ["average"]
+  #     timespan: ["PT3M"]
+  #     interval: ["PT1M"]
+  #     format: ["json"]
+  #   static_configs:
+  #     - targets: ["127.0.0.1:8080"]

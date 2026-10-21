@@ -28,6 +28,10 @@ type Batch struct {
 	Metrics     []byte
 	Families    int
 	Window      *metricdata.Window
+	Query       string
+	Interval    time.Duration
+	MetricsPath string
+	Params      map[string][]string
 }
 
 type Sink func(context.Context, Batch) error
@@ -90,6 +94,7 @@ func (s *Scraper) runTarget(ctx context.Context, job Job, target string, labels 
 }
 
 func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map[string]string) error {
+	deliveryCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(job.Timeout))
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, job.targetURL(target), nil)
@@ -121,6 +126,11 @@ func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map
 	batch := Batch{
 		Job: job.Name, Target: target, Labels: labels, ScrapedAt: time.Now().UTC(),
 		ContentType: resp.Header.Get("Content-Type"), Metrics: body,
+		Interval:    time.Duration(job.Interval),
+		MetricsPath: job.MetricsPath, Params: job.Params,
+	}
+	if len(job.Params["query"]) == 1 {
+		batch.Query = job.Params["query"][0]
 	}
 	mediaType := ""
 	if batch.ContentType != "" {
@@ -138,6 +148,9 @@ func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map
 		if err != nil {
 			return err
 		}
+		if s.Config.EventHub != nil && batch.Window.Source != eventHubSource(job.MetricsPath) {
+			return fmt.Errorf("metrics window source %q does not match endpoint %q", batch.Window.Source, job.MetricsPath)
+		}
 		names := make(map[string]bool)
 		samples := 0
 		for _, series := range batch.Window.Metrics {
@@ -154,7 +167,7 @@ func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map
 		}
 		batch.Families = len(families)
 	}
-	if err := s.Sink(ctx, batch); err != nil {
+	if err := s.Sink(deliveryCtx, batch); err != nil {
 		return fmt.Errorf("deliver scraped metrics: %w", err)
 	}
 	logger.Info("scrape completed", "job", job.Name, "target", target,
@@ -162,10 +175,9 @@ func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map
 	return nil
 }
 
-func PendingEventHubSink(logger *slog.Logger) Sink {
+func DiscardSink(logger *slog.Logger) Sink {
 	return func(_ context.Context, batch Batch) error {
-		// TODO: Send the batch to Azure Event Hubs with bounded retries and backpressure.
-		logger.Info("Event Hub delivery not implemented; discarding batch",
+		logger.Info("Event Hub not configured; discarding batch",
 			"job", batch.Job, "target", batch.Target, "bytes", len(batch.Metrics))
 		return nil
 	}

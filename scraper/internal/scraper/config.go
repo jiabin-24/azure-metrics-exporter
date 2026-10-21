@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/webdevops/azure-metrics-exporter/config"
+	"github.com/webdevops/azure-metrics-exporter/internal/metricdata"
 	"go.yaml.in/yaml/v2"
 )
 
@@ -32,8 +34,14 @@ type Timing struct {
 }
 
 type Config struct {
-	Global Timing `yaml:"global"`
-	Jobs   []Job  `yaml:"scrape_configs"`
+	Global   Timing          `yaml:"global"`
+	Jobs     []Job           `yaml:"scrape_configs"`
+	EventHub *EventHubConfig `yaml:"event_hub"`
+}
+
+type EventHubConfig struct {
+	Namespace string `yaml:"namespace"`
+	Name      string `yaml:"name"`
 }
 
 type Job struct {
@@ -82,6 +90,12 @@ func ParseConfig(data []byte) (*Config, error) {
 	if len(cfg.Jobs) == 0 {
 		return nil, fmt.Errorf("scrape_configs must contain at least one job")
 	}
+	if cfg.EventHub != nil {
+		if !regexp.MustCompile(`^[a-zA-Z0-9-]+\.servicebus\.windows\.net$`).MatchString(cfg.EventHub.Namespace) ||
+			!regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`).MatchString(cfg.EventHub.Name) {
+			return nil, fmt.Errorf("event_hub requires a servicebus.windows.net namespace hostname and a valid hub name")
+		}
+	}
 	names := make(map[string]bool)
 	for i := range cfg.Jobs {
 		job := &cfg.Jobs[i]
@@ -109,6 +123,15 @@ func ParseConfig(data []byte) (*Config, error) {
 		}
 		if job.MetricsPath == "" {
 			job.MetricsPath = "/metrics"
+		}
+		if cfg.EventHub != nil {
+			source := eventHubSource(job.MetricsPath)
+			if source == "" || len(job.Params["format"]) != 1 || job.Params["format"][0] != "json" {
+				return nil, fmt.Errorf("job %q: Event Hub export requires a supported metrics probe endpoint and format=json", job.Name)
+			}
+			if source == metricdata.PrometheusSource && (len(job.Params["query"]) != 1 || job.Params["query"][0] == "") {
+				return nil, fmt.Errorf("job %q: PromQL Event Hub export requires exactly one query", job.Name)
+			}
 		}
 		path, err := url.Parse(job.MetricsPath)
 		if err != nil || path == nil || path.IsAbs() || path.Host != "" ||
@@ -157,4 +180,16 @@ func (j Job) targetURL(target string) string {
 	u.Path, u.RawPath = path.Path, path.RawPath
 	u.RawQuery = url.Values(j.Params).Encode()
 	return u.String()
+}
+
+func eventHubSource(path string) string {
+	switch path {
+	case config.ProbeMetricsPromQLUrl:
+		return metricdata.PrometheusSource
+	case config.ProbeMetricsResourceUrl, config.ProbeMetricsListUrl, config.ProbeMetricsSubscriptionUrl,
+		config.ProbeMetricsScrapeUrl, config.ProbeMetricsResourceGraphUrl:
+		return metricdata.Source
+	default:
+		return ""
+	}
 }

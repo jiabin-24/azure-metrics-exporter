@@ -6,7 +6,7 @@
 
 采集器的代码、测试、配置文件、Dockerfile、部署清单和说明统一放在本目录，与 exporter 共用仓库根目录的 Go module，但独立构建镜像。以下命令均从 `scraper` 目录执行；若当前在仓库根目录，先执行 `cd .\scraper`。
 
-**当前阶段仅实现采集。Azure Event Hub 发送尚未实现，数据不持久化、不缓存、不重试发送。** 每次成功采集只记录 job、target、指标族数量和响应字节数，并明确记录丢弃 batch 的日志；不会输出完整指标内容，也不会声称消息已经发送。
+配置 `event_hub` 后，采集器按数据源封装消息：PromQL JSON 转换为 AKS 控制平面业务 JSON，Azure Monitor 平台 JSON 转换为按资源分组的平台指标消息，共用 Azure Event Hubs Go SDK 和 SAS 认证发送层。日志只在服务确认后记录 `Event Hub delivery completed`；不会输出密钥或完整指标正文。未配置 `event_hub` 时保留仅采集模式，明确记录丢弃 batch 的日志。数据不落盘，不提供断点续传或历史补采。
 
 ## 配置
 
@@ -73,7 +73,7 @@ scrape_configs:
 
 scraper 为 `format=json` 请求发送 `Accept: application/json`，校验响应 Content-Type、schemaVersion、source、序列结构和采样点。若 exporter 仍返回旧的文本响应，会明确报错，不静默退回单点模式。JSON 成功日志额外记录 `series`、`samples`；`metric_families` 为不同输出指标名的数量，不是序列或采样点数量。batch 同时保留原始 JSON 和解析后的窗口，不丢弃历史点。
 
-这仍然只采集 exporter 已返回的窗口，不提供持久化、历史补采或 Event Hub 发送。完整接口参数和字段约定见[平台指标 JSON](../README.md#platform-window-json)。不会把平台响应自动转换成 AKS PromQL 业务导出文件。
+平台指标只采集 exporter 已返回的窗口，不提供持久化或历史补采。启用 `event_hub` 后，此 job 可与 PromQL JSON jobs 在同一实例中发送到同一个 Hub，使用独立的 `source: "azure-monitor"` 消息格式，不伪装成 AKS 控制平面指标。`/metrics` 文本 job 仍需使用不配置 `event_hub` 的独立实例。完整接口参数和字段约定见[平台指标 JSON](../README.md#platform-window-json)。
 
 ## PromQL JSON 采集
 
@@ -104,7 +104,7 @@ PromQL 与平台指标使用相同的 `params.format: ["json"]`，无需增加�
 go run .\cmd\metrics-scraper --config.file=.\scraper.yaml --web.listen-address=:8081
 ```
 
-采集器不需要 Azure 凭据；身份和权限仍由现有 exporter 管理。`/healthz` 和 `/readyz` 表示进程及配置已就绪，不代表上游抓取成功或 Event Hub 已连通。抓取失败需查看日志。Ctrl+C 或 SIGTERM 会取消正在执行的请求并退出。
+访问 exporter 不需要 Azure 凭据；查询 Azure 指标的身份仍由 exporter 管理。启用 Event Hub 后，先按下节设置 SAS 连接字符串。`/healthz` 和 `/readyz` 表示进程及配置已就绪，不代表上游抓取成功或 Event Hub 已连通。采集和发送失败需查看日志。Ctrl+C 或 SIGTERM 会取消正在执行的请求和发送并关闭生产者连接。
 
 ## Kubernetes 部署
 
@@ -133,11 +133,117 @@ kubectl rollout restart -n <namespace> deployment/azure-metrics-scraper
 kubectl rollout status -n <namespace> deployment/azure-metrics-scraper
 ```
 
-无需 Service、Azure 身份或额外 RBAC；健康探针直接访问 Pod。集群网络策略需要允许采集 Pod 访问 exporter。
+无需 Service 或额外 Azure RBAC；健康探针直接访问 Pod。启用 Event Hub 时，部署前需在同一 namespace 中准备名为 `azure-metrics-eventhub` 的 Kubernetes Secret，键为 `connection-string`，通过现有 Secret 管理工具注入，不要提交到仓库。清单使用 `secretKeyRef` 注入环境变量。集群网络策略需要允许访问 exporter、DNS 及 Event Hubs 的 TLS AMQP 端口 5671。
 
-## Event Hub TODO
+## Event Hub SAS 推送
 
-后续在 [采集逻辑](internal/scraper/scraper.go) 的 `PendingEventHubSink` 接入真实发送，沿用 batch 中的原始源时间戳及 job / target / labels 元数据。届时再确定消息 schema、身份权限、批大小、重试、背压和持久化策略；当前未引入 Event Hub SDK 或凭据配置。
+本地配置及 Kubernetes ConfigMap 已启用以下目标，不会创建或修改 Azure 资源：
+
+```yaml
+event_hub:
+  namespace: shein-aks-metrics.servicebus.windows.net
+  name: shein-aks-metrics
+```
+
+在启动采集器的同一终端中，安全读取具有 **Send** 权限的 SAS policy 连接字符串（必须含 `EntityPath=shein-aks-metrics`），无需 Listen / Manage 权限：
+
+```powershell
+$secret = Read-Host "Event Hub SAS connection string" -AsSecureString
+$env:AZURE_EVENTHUB_CONNECTION_STRING = [System.Net.NetworkCredential]::new("", $secret).Password
+go run .\cmd\metrics-scraper --config.file=.\scraper.yaml --web.listen-address=:8081
+```
+
+连接字符串的结构为 `Endpoint=sb://shein-aks-metrics.servicebus.windows.net/;SharedAccessKeyName=<send-policy>;SharedAccessKey=<key>;EntityPath=shein-aks-metrics`。不要将真实字符串放入 YAML、命令行参数、日志或聊天。缺失凭据、目标不匹配、配置文本或不支持的端点时启动失败，不静默丢弃数据。修改凭据后重启进程。
+
+PromQL 消息与示例业务 JSON 使用相同字段结构：
+
+```json
+{
+  "schemaVersion": "1.0",
+  "source": "aks-controlplane",
+  "cluster": "sk-rundeck",
+  "region": "",
+  "windowStart": "2026-10-21T15:00:26Z",
+  "windowEnd": "2026-10-21T15:00:26Z",
+  "scrapeInterval": "1m0s",
+  "metrics": [
+    {
+      "name": "apiserver_request_total",
+      "promql": "apiserver_request_total",
+      "labels": {"cluster": "sk-rundeck", "code": "200"},
+      "samples": [["2026-10-21T15:00:26Z", 1313]]
+    }
+  ]
+}
+```
+
+上例仅展示部分标签；实际发送保留全部原始标签、指标名和采样点，不将 counter 改成 rate，也不伪造示例中的业务指标名。
+
+- 所有 Event Hub jobs 必须使用 `format: ["json"]`。PromQL job 使用 `/probe/metrics/promql` 及一个 `query`；同一查询的全部结果序列都携带实际查询表达式 `promql`。平台 job 支持 `/probe/metrics`、`/probe/metrics/resource`、`/probe/metrics/list`、`/probe/metrics/scrape`、`/probe/metrics/resourcegraph`；原有查询参数原样传给 exporter。响应 `source` 与请求端点不匹配时拒绝发送。
+- PromQL 按 `(cluster, region)` 分组。`cluster` 优先来自序列标签，其次是 job 的静态 labels；两者都缺失则报错。两类数据的 region 都优先读取序列的 `region` / `location`，其次读取静态 labels 的同名字段；仍缺失则使用空字符串并记录警告，不从工作区名称或资源 ID 猜测。
+- `windowStart` / `windowEnd` 是组内实际源采样时间的最小值 / 最大值；即时查询可能相等，也可能包含不同源时间。`scrapeInterval` 是 job 的抓取周期，不是查询步长；保留亚秒精度。
+- 空结果或无采样点的序列不发送，不补零、不生成伪造窗口，会记录无事件日志（整个结果为空时）。既不累积最近三分钟，也不自动执行示例中的全部 PromQL。
+- 每条事件正文不超过 200 KiB，使用 256 KiB 的 SDK batch 上限预留 AMQP 开销。大组按序列拆分；单条序列过大时按 samples 拆分，每条消息仍是完整有效 JSON，并保留原组窗口元数据。不能拆分的超大单点会在发送前报错。所有消息预先编码和校验，避免编码错误导致部分发送。
+- PromQL 同一 cluster 使用相同 partition key。平台指标使用资源 ID 的小写形式计算 SHA-256 作为 partition key，避免长 ARM ID 超过长度限制。消息的 AMQP Content-Type 为 `application/json`。不保证不同 job 的发送顺序，也不提供消费端确认或 exactly-once。
+- HTTP 抓取继续受 `scrape_timeout` 限制；每批发送另有 30 秒总超时，使用 SDK 默认有界重试。同一 target 同步发送形成背压，不积累无界后台队列；target 的一次采集加发送可能超过抓取周期，但不会重叠。
+- 失败明确记录已确认事件数量；若前几条已成功而后续失败，可能出现部分发送或重试重复。无本地持久化、离线重放或应用层整批重试，下一轮采集新数据，不重发旧批。消费者应按指标名、完整标签及源时间戳进行幂等处理。
+
+### Azure Monitor 平台指标消息
+
+将上文[平台指标 JSON job](#平台指标-json-采集) 加入 `scrape_configs` 并填写真实订阅和资源 ID 即可，无需新增凭据或生产者。例如：
+
+```json
+{
+  "schemaVersion": "1.0",
+  "source": "azure-monitor",
+  "resourceId": "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm",
+  "query": {
+    "path": "/probe/metrics/resource",
+    "params": {
+      "subscription": ["sub"],
+      "target": ["/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm"],
+      "metric": ["Percentage CPU"],
+      "aggregation": ["average"],
+      "timespan": ["PT3M"],
+      "interval": ["PT1M"],
+      "format": ["json"]
+    }
+  },
+  "region": "",
+  "windowStart": "2026-10-21T15:00:00Z",
+  "windowEnd": "2026-10-21T15:01:00Z",
+  "scrapeInterval": "1m0s",
+  "metrics": [
+    {
+      "name": "azure_cpu",
+      "labels": {
+        "resourceID": "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm",
+        "aggregation": "average",
+        "unit": "Percent",
+        "dimension": "node-a"
+      },
+      "samples": [["2026-10-21T15:00:00Z", 25.5], ["2026-10-21T15:01:00Z", 26.5]]
+    }
+  ]
+}
+```
+
+- 平台消息不生成顶层 `cluster` 或指标的 `promql`；原始 labels 中已有同名标签时仍保留。`query.path` 和 `query.params` 记录实际 exporter 端点及全部请求参数，包括多值列表。不要在查询参数中存放凭据。
+- 按 `(resourceID 的小写形式, region)` 分组，但不改写原始资源 ID 或标签。保留原始指标名、聚合类型、单位、维度和全部历史采样点；不同聚合仍由 labels 区分，不补零、不丢失历史点。
+- 资源 ID 优先取序列的 `resourceID` 标签；仅 `/probe/metrics/resource` 且请求中恰好一个 `target` 时可回退到该 target。自动发现、订阅查询或多 target 请求不猜测资源归属。资源 ID 缺失时省略顶层 `resourceId` 并明确记录警告；仍保留全部序列和查询上下文，使用 job、exporter target、查询端点及参数的 SHA-256 作为备用 partition key。
+- 与 PromQL 共用窗口时间规则、200 KiB 正文限制、拆分、30 秒发送超时和有界重试。每个拆分消息都携带完整查询上下文及原组窗口。
+
+### 真实发送验证
+
+确保 exporter 正在运行，并在当前终端设置连接字符串后，从 `scraper` 目录执行：
+
+```powershell
+$env:AZURE_EVENTHUB_LIVE_TEST = "1"
+go test ./internal/scraper -run '^TestLiveEventHubDelivery$' -count=1 -v
+Remove-Item Env:\AZURE_EVENTHUB_LIVE_TEST
+```
+
+此显式启用的测试会真实采集并发送一次，空指标结果或发送失败都会失败；普通 `go test` 不连接 Azure。成功日志只证明 Event Hubs 服务已确认写入，不证明下游消费者已处理。SDK 参考：[Azure Event Hubs Go SDK](https://pkg.go.dev/github.com/Azure/azure-sdk-for-go/sdk/messaging/azeventhubs/v2)。
 
 ## 验证
 

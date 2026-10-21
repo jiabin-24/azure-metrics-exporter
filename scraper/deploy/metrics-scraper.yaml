@@ -7,27 +7,24 @@ data:
     global:
       scrape_interval: 1m
       scrape_timeout: 30s
+    event_hub:
+      namespace: shein-aks-metrics.servicebus.windows.net
+      name: shein-aks-metrics
     scrape_configs:
       - job_name: azure-control-plane
         metrics_path: /probe/metrics/promql
         honor_timestamps: true
         params:
           query: ["apiserver_request_total"]
-          # For JSON, uncomment format; add start/end/step for a fixed range.
-          # format: ["json"]
+          format: ["json"]
           # Set query_delay to match the workspace ingestion delay if necessary.
           # query_delay: ["20m"]
         static_configs:
           - targets: ["azure-metrics:8080"]
             labels:
               environment: production
-      - job_name: exporter-self
-        scrape_interval: 30s
-        scrape_timeout: 5s
-        metrics_path: /metrics
-        static_configs:
-          - targets: ["azure-metrics:8080"]
-      # Platform window jobs may use params.format: ["json"]; see ../README.md.
+      # Platform JSON jobs may share this Event Hub; see scraper/README.md.
+      # Replace subscription/resource placeholders before adding a platform job.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -62,6 +59,12 @@ spec:
           args:
             - --config.file=/etc/azure-metrics-scraper/scraper.yaml
             - --web.listen-address=:8081
+          env:
+            - name: AZURE_EVENTHUB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: azure-metrics-eventhub
+                  key: connection-string
           ports:
             - name: health
               containerPort: 8081

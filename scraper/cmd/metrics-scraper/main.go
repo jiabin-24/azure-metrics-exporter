@@ -29,10 +29,27 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, configPath, address string, logger *slog.Logger) error {
+func run(ctx context.Context, configPath, address string, logger *slog.Logger) (resultErr error) {
 	cfg, err := scraper.LoadConfig(configPath)
 	if err != nil {
 		return err
+	}
+	sink := scraper.DiscardSink(logger)
+	if cfg.EventHub != nil {
+		var closeProducer func(context.Context) error
+		sink, closeProducer, err = scraper.NewEventHubSink(*cfg.EventHub, logger)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := closeProducer(closeCtx); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("close Event Hub producer: %w", err))
+			}
+		}()
+	} else {
+		logger.Warn("Event Hub is not configured; collected batches will be discarded")
 	}
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
@@ -57,9 +74,9 @@ func run(ctx context.Context, configPath, address string, logger *slog.Logger) e
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
-		scraper.New(cfg, logger, scraper.PendingEventHubSink(logger)).Run(ctx)
+		scraper.New(cfg, logger, sink).Run(ctx)
 	}()
-	logger.Warn("scraper started; Event Hub is TODO, collected data is not persisted or sent",
+	logger.Info("scraper started",
 		"jobs", len(cfg.Jobs), "health_address", listener.Addr().String())
 	select {
 	case <-ctx.Done():

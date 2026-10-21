@@ -110,6 +110,7 @@ func TestRunLifecycle(t *testing.T) {
 	if err := run(context.Background(), filepath.Join(t.TempDir(), "missing.yaml"), ":0", logger); err == nil {
 		t.Fatal("missing config must fail startup")
 	}
+
 	configPath := filepath.Join(t.TempDir(), "scraper.yaml")
 	if err := os.WriteFile(configPath, []byte("scrape_configs:\n- job_name: test\n  static_configs:\n  - targets: [localhost:1]\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -133,5 +134,14 @@ func TestRunLifecycle(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("shutdown timed out")
+	}
+}
+
+func TestRunEventHubRequiresCredentials(t *testing.T) {
+	t.Setenv("AZURE_EVENTHUB_CONNECTION_STRING", "")
+	err := run(context.Background(), filepath.Join("..", "..", "scraper.yaml"), "127.0.0.1:0",
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil || !strings.Contains(err.Error(), "AZURE_EVENTHUB_CONNECTION_STRING") {
+		t.Fatalf("missing Event Hub credentials must fail startup, got %v", err)
 	}
 }
