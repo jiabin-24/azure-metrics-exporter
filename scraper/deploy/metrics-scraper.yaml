@@ -19,6 +19,12 @@ data:
           - targets: ["azure-metrics:8080"]
             labels:
               environment: production
+      - job_name: exporter-self
+        scrape_interval: 30s
+        scrape_timeout: 5s
+        metrics_path: /metrics
+        static_configs:
+          - targets: ["azure-metrics:8080"]
 ---
 apiVersion: apps/v1
 kind: Deployment

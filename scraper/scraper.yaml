@@ -1,0 +1,23 @@
+global:
+  scrape_interval: 1m
+  scrape_timeout: 30s
+
+scrape_configs:
+  - job_name: azure-control-plane
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    params:
+      query: ["apiserver_request_total"]
+      # Set query_delay to match the workspace ingestion delay if necessary.
+      # query_delay: ["20m"]
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+        labels:
+          environment: development
+
+  - job_name: exporter-self
+    scrape_interval: 30s
+    scrape_timeout: 5s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8080"]

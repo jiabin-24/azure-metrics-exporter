@@ -15,6 +15,22 @@ import (
 	"go.yaml.in/yaml/v2"
 )
 
+func TestLocalConfig(t *testing.T) {
+	cfg, err := scraper.LoadConfig(filepath.Join("..", "..", "scraper.yaml"))
+	if err != nil {
+		t.Fatalf("project contains invalid scrape config: %v", err)
+	}
+	for _, job := range cfg.Jobs {
+		for _, group := range job.StaticConfigs {
+			for _, target := range group.Targets {
+				if target != "127.0.0.1:8080" {
+					t.Fatalf("local job %q should target the local exporter, got %q", job.Name, target)
+				}
+			}
+		}
+	}
+}
+
 func TestDeploymentConfig(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "metrics-scraper.yaml"))
 	if err != nil {
@@ -22,17 +38,20 @@ func TestDeploymentConfig(t *testing.T) {
 	}
 	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
 	var configMap struct {
-		Kind string            `yaml:"kind"`
+		Kind     string `yaml:"kind"`
+		Metadata struct {
+			Name string `yaml:"name"`
+		} `yaml:"metadata"`
 		Data map[string]string `yaml:"data"`
 	}
 	if err := decoder.Decode(&configMap); err != nil {
 		t.Fatal(err)
 	}
-	if configMap.Kind != "ConfigMap" {
-		t.Fatalf("unexpected config kind: %s", configMap.Kind)
+	if configMap.Kind != "ConfigMap" || configMap.Metadata.Name != "azure-metrics-scraper" {
+		t.Fatalf("unexpected ConfigMap: %+v", configMap)
 	}
 	if _, err := scraper.ParseConfig([]byte(configMap.Data["scraper.yaml"])); err != nil {
-		t.Fatalf("deployment contains invalid scrape config: %v", err)
+		t.Fatalf("ConfigMap contains invalid scrape config: %v", err)
 	}
 	var deployment struct {
 		Kind string `yaml:"kind"`
@@ -44,9 +63,20 @@ func TestDeploymentConfig(t *testing.T) {
 			Template struct {
 				Spec struct {
 					Containers []struct {
-						Command []string `yaml:"command"`
-						Args    []string `yaml:"args"`
+						Command      []string `yaml:"command"`
+						Args         []string `yaml:"args"`
+						VolumeMounts []struct {
+							Name      string `yaml:"name"`
+							MountPath string `yaml:"mountPath"`
+							ReadOnly  bool   `yaml:"readOnly"`
+						} `yaml:"volumeMounts"`
 					} `yaml:"containers"`
+					Volumes []struct {
+						Name      string `yaml:"name"`
+						ConfigMap struct {
+							Name string `yaml:"name"`
+						} `yaml:"configMap"`
+					} `yaml:"volumes"`
 				} `yaml:"spec"`
 			} `yaml:"template"`
 		} `yaml:"spec"`
@@ -58,8 +88,20 @@ func TestDeploymentConfig(t *testing.T) {
 	if deployment.Kind != "Deployment" || deployment.Spec.Replicas != 1 ||
 		deployment.Spec.Strategy.Type != "Recreate" || len(containers) != 1 ||
 		len(containers[0].Command) != 1 || containers[0].Command[0] != "/azure-metrics-scraper" ||
-		len(containers[0].Args) != 2 {
+		len(containers[0].Args) != 2 ||
+		containers[0].Args[0] != "--config.file=/etc/azure-metrics-scraper/scraper.yaml" ||
+		len(containers[0].VolumeMounts) != 1 || len(deployment.Spec.Template.Spec.Volumes) != 1 {
 		t.Fatalf("unexpected deployment: %+v", deployment)
+	}
+	mount := containers[0].VolumeMounts[0]
+	volume := deployment.Spec.Template.Spec.Volumes[0]
+	if mount.Name != volume.Name || mount.MountPath != "/etc/azure-metrics-scraper" ||
+		!mount.ReadOnly || volume.ConfigMap.Name != configMap.Metadata.Name {
+		t.Fatalf("deployment does not mount the ConfigMap correctly: mount=%+v volume=%+v", mount, volume)
+	}
+	var extraDocument interface{}
+	if err := decoder.Decode(&extraDocument); err != io.EOF {
+		t.Fatalf("expected only a ConfigMap and Deployment, got another YAML document or error: %v", err)
 	}
 }
 
