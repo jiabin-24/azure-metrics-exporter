@@ -32,6 +32,7 @@
     * [AKS 高级控制平面指标](PROMQL.md#aks-control-plane)
 * [开发和测试查询 Web UI](#development-and-testing-query-webui)
 * [PromQL 查询与本地启动](PROMQL.md)
+* [独立定时指标采集 Pod](scraper/README.md)
 
 <a id="Features"></a>
 ## 功能
@@ -47,6 +48,7 @@
 - 可通过基于 Kusto 查询的 [Azure Resource Graph API](https://docs.microsoft.com/en-us/azure/governance/resource-graph/overview)，获取服务发现发现的资源指标（参见 `/probe/metrics/resourcegraph`）
 - 可通过 Azure Monitor 工作区的 Prometheus API 查询 PromQL 指标（参见 [PromQL 查询与 AKS 控制平面指标](PROMQL.md)）
 - 基于 Prometheus 抓取配置或 ServiceMonitor 清单（Prometheus Operator）进行配置
+- 可选的[独立定时采集 Pod](scraper/README.md)：按静态 job 配置拉取指标；Event Hub 发送暂为 TODO，不持久化数据
 - 可在抓取配置中处理指标（添加、删除、更新或筛选标签或指标），例如 [`metric_relabel_configs`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#metric_relabel_configs)
 - 完整支持指标[维度](#virtualnetworkgateway-connections-dimension-support)
 - Docker 镜像基于 [Google 的 distroless](https://github.com/GoogleContainerTools/distroless) 静态镜像构建，以缩小攻击面（镜像中不含 shell 或其他二进制文件）

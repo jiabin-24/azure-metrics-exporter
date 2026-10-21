@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: azure-metrics-scraper
+data:
+  scraper.yaml: |
+    global:
+      scrape_interval: 1m
+      scrape_timeout: 30s
+    scrape_configs:
+      - job_name: azure-control-plane
+        metrics_path: /probe/metrics/promql
+        honor_timestamps: true
+        params:
+          query: ["apiserver_request_total"]
+          # Set query_delay to match the workspace ingestion delay if necessary.
+          # query_delay: ["20m"]
+        static_configs:
+          - targets: ["azure-metrics:8080"]
+            labels:
+              environment: production
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: azure-metrics-scraper
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: azure-metrics-scraper
+  template:
+    metadata:
+      labels:
+        app: azure-metrics-scraper
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: scraper
+          # Build and publish the updated repository image before applying.
+          image: azure-metrics-scraper:local
+          imagePullPolicy: IfNotPresent
+          command: ["/azure-metrics-scraper"]
+          args:
+            - --config.file=/etc/azure-metrics-scraper/scraper.yaml
+            - --web.listen-address=:8081
+          ports:
+            - name: health
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/azure-metrics-scraper
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: azure-metrics-scraper

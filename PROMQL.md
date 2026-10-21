@@ -11,6 +11,7 @@
 * [AKS 高级控制平面指标](#aks-control-plane)
     * [etcd 专项指标与 job](#etcd-metrics)
 * [Windows PowerShell 本地启动](#local-startup)
+* [不部署 Prometheus 的定时采集 Pod](scraper/README.md)
 * [验证与排查](#verification)
 * [官方参考](#references)
 
