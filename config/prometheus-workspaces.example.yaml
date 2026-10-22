@@ -1,5 +1,5 @@
 workspaces:
   workspace-a:
-    query_endpoint: https://<workspace-a>.<region>.prometheus.monitor.azure.com
-  workspace-b:
-    query_endpoint: https://<workspace-b>.<region>.prometheus.monitor.azure.com
+    query_endpoint: https://defaultazuremonitorworkspace-ea-f5ejfbdvancyfbam.eastasia.prometheus.monitor.azure.com
+  # workspace-b:
+  #   query_endpoint: https://<workspace-b>.<region>.prometheus.monitor.azure.com
