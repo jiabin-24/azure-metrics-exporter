@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -296,6 +297,55 @@ func TestRunLifecycle(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("shutdown timed out")
+	}
+}
+
+func TestRunAllWorkspaces(t *testing.T) {
+	requests := make(chan string, 4)
+	exporter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/probe/metrics/promql/workspaces" {
+			fmt.Fprint(w, `{"workspaces":["b","a"]}`)
+			return
+		}
+		if r.URL.Path != "/probe/metrics/promql" {
+			t.Errorf("unexpected scrape path: %s", r.URL.Path)
+		}
+		requests <- r.URL.Query().Get("workspace")
+		fmt.Fprint(w, "up 1\n")
+	}))
+	defer exporter.Close()
+	path := filepath.Join(t.TempDir(), "scraper.yaml")
+	data := fmt.Sprintf("global: {scrape_interval: 1h, scrape_timeout: 1s}\nscrape_configs:\n- job_name: all\n  metrics_path: /probe/metrics/promql\n  static_configs:\n  - targets: ['%s']\n", strings.TrimPrefix(exporter.URL, "http://"))
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, path, "127.0.0.1:0", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("all-workspace runtime shutdown: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("all-workspace runtime did not shut down")
+		}
+	}()
+	seen := make(map[string]bool)
+	for range 2 {
+		select {
+		case workspace := <-requests:
+			if (workspace != "a" && workspace != "b") || seen[workspace] {
+				t.Fatalf("invalid or duplicate workspace request: %q", workspace)
+			}
+			seen[workspace] = true
+		case <-time.After(3 * time.Second):
+			t.Fatal("scraper did not start a task for every workspace")
+		}
 	}
 }
 

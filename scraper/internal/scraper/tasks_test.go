@@ -13,20 +13,19 @@ import (
 	"time"
 )
 
-func TestWorkspaceConfigValidation(t *testing.T) {
+func TestWorkspaceSelectionIsNotConfigurable(t *testing.T) {
 	base := "scrape_configs:\n- job_name: test\n  metrics_path: /probe/metrics/promql\n  static_configs:\n  - targets: [exporter:8080]\n"
 	for name, extra := range map[string]string{
+		"automatic":        "",
 		"single":           "  workspaces: [a]\n",
 		"multiple":         "  workspaces: [a, b]\n",
-		"missing":          "",
+		"wildcard":         "  workspaces: ['*']\n",
 		"empty":            "  workspaces: []\n",
-		"duplicate":        "  workspaces: [a, a]\n",
-		"invalid":          "  workspaces: ['https://workspace']\n",
-		"params workspace": "  workspaces: [a]\n  params:\n    workspace: [b]\n",
+		"params workspace": "  params:\n    workspace: [b]\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg, err := ParseConfig([]byte(base + extra))
-			if (name == "single" || name == "multiple") != (err == nil) {
+			if (name == "automatic") != (err == nil) {
 				t.Fatalf("unexpected validation result: %v", err)
 			}
 			if err == nil && cfg.Cluster != nil {
@@ -34,11 +33,10 @@ func TestWorkspaceConfigValidation(t *testing.T) {
 			}
 		})
 	}
-	valid := base + "  workspaces: [a]\n"
-	if _, err := ParseConfig([]byte(valid + "sharding: {total: 2, index: 0}\n")); err == nil {
+	if _, err := ParseConfig([]byte(base + "sharding: {total: 2, index: 0}\n")); err == nil {
 		t.Fatal("removed static sharding configuration must fail parsing")
 	}
-	if _, err := ParseConfig([]byte(strings.Replace(valid, "/probe/metrics/promql", "/metrics", 1))); err == nil {
+	if _, err := ParseConfig([]byte(strings.Replace(base, "/probe/metrics/promql", "/metrics", 1) + "  workspaces: [a]\n")); err == nil {
 		t.Fatal("workspaces accepted on a non-PromQL job")
 	}
 }
@@ -46,7 +44,7 @@ func TestWorkspaceConfigValidation(t *testing.T) {
 func TestTasksExpandEveryWorkspaceAndTarget(t *testing.T) {
 	job := testJob("exporter:8080")
 	job.StaticConfigs[0].Targets = []string{"exporter:8080", "other:8080"}
-	job.Workspaces = []string{"a", "b"}
+	job.workspaces = []string{"a", "b"}
 	platform := testJob("platform:8080")
 	platform.Name, platform.MetricsPath = "platform", "/probe/metrics/resource"
 	cfg := &Config{Jobs: []Job{job, platform}}
@@ -74,18 +72,18 @@ func TestTasksExpandEveryWorkspaceAndTarget(t *testing.T) {
 
 func TestTaskIdentityIgnoresOrderingAndParamsAreIsolated(t *testing.T) {
 	job := testJob("exporter:8080")
-	job.Workspaces = []string{"a", "b"}
+	job.workspaces = []string{"a", "b"}
 	job.StaticConfigs[0].Targets = []string{"exporter:8080", "other:8080"}
 	cfg := &Config{Jobs: []Job{job}}
 	tasks := cfg.Tasks()
 	ids := make(map[string]bool)
 	for _, task := range tasks {
 		ids[task.ID] = true
-		if len(task.Job.Params["workspace"]) != 1 || !slices.Contains(job.Workspaces, task.Job.Params["workspace"][0]) {
+		if len(task.Job.Params["workspace"]) != 1 || !slices.Contains(job.workspaces, task.Job.Params["workspace"][0]) {
 			t.Fatal("expanded task must select exactly one workspace")
 		}
 	}
-	slices.Reverse(job.Workspaces)
+	slices.Reverse(job.workspaces)
 	slices.Reverse(job.StaticConfigs[0].Targets)
 	for _, task := range cfg.Tasks() {
 		if !ids[task.ID] {
@@ -98,8 +96,16 @@ func TestTaskIdentityIgnoresOrderingAndParamsAreIsolated(t *testing.T) {
 	}
 }
 
-func TestTwoMemberlistInstancesCollectDisjointWorkspaces(t *testing.T) {
+func TestTwoMemberlistInstancesCollectAllWorkspacesDisjointly(t *testing.T) {
+	var workspaces []string
+	for i := range 20 {
+		workspaces = append(workspaces, fmt.Sprintf("workspace-%d", i))
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/probe/metrics/promql/workspaces" {
+			json.NewEncoder(w).Encode(map[string][]string{"workspaces": workspaces})
+			return
+		}
 		if len(r.URL.Query()["workspace"]) != 1 {
 			t.Error("request did not select exactly one workspace")
 		}
@@ -109,15 +115,17 @@ func TestTwoMemberlistInstancesCollectDisjointWorkspaces(t *testing.T) {
 	target := strings.TrimPrefix(server.URL, "http://")
 	job := testJob(target)
 	job.Interval = Duration(time.Hour)
-	for i := range 20 {
-		job.Workspaces = append(job.Workspaces, fmt.Sprintf("workspace-%d", i))
-	}
 	type delivery struct {
 		index int
 		batch Batch
 	}
-	deliveries := make(chan delivery, len(job.Workspaces)*2)
+	deliveries := make(chan delivery, len(workspaces)*2)
 	cfg := &Config{Jobs: []Job{job}}
+	resolver := New(cfg, quietLogger(), nil)
+	defer resolver.Client.CloseIdleConnections()
+	if err := resolver.ResolveWorkspaces(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	first := testCluster(t, cfg, "node-0")
 	second := testCluster(t, cfg, "node-1", first.list.LocalNode().Address())
 	waitFor(t, "two-node membership", func() bool {
@@ -136,7 +144,7 @@ func TestTwoMemberlistInstancesCollectDisjointWorkspaces(t *testing.T) {
 		defer stop()
 	}
 	seen := make(map[string]bool)
-	for range job.Workspaces {
+	for range workspaces {
 		select {
 		case got := <-deliveries:
 			if seen[got.batch.TaskID] || got.batch.Workspace == "" ||
@@ -194,7 +202,7 @@ func TestFailedWorkspaceDoesNotBlockHealthyWorkspace(t *testing.T) {
 	}))
 	defer server.Close()
 	job := testJob(strings.TrimPrefix(server.URL, "http://"))
-	job.Workspaces = []string{"bad", "healthy"}
+	job.workspaces = []string{"bad", "healthy"}
 	job.Interval = Duration(time.Hour)
 	cfg := &Config{Jobs: []Job{job}}
 	delivered := make(chan Batch, 2)

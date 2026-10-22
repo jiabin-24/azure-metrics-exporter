@@ -14,8 +14,7 @@ event_hub:
 
 scrape_configs:
   - job_name: azure-control-plane
-    # Aliases must exist in the exporter workspace configuration.
-    workspaces: ["workspace-a"]
+    # Automatically collects every workspace configured in the exporter.
     metrics_path: /probe/metrics/promql
     honor_timestamps: true
     # 每次抓取查询 [当前时间-delay-window, 当前时间-delay]，不按整分钟取整。

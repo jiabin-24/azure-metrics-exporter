@@ -157,6 +157,7 @@ func startHttpServer() {
 	mux.HandleFunc(config.ProbeMetricsResourceGraphUrl, probeMetricsResourceGraphHandler)
 
 	mux.HandleFunc(config.ProbeMetricsPromQLUrl, probeMetricsPromQLHandler)
+	mux.HandleFunc(config.ProbeMetricsPromQLWorkspacesUrl, promQLWorkspacesHandler)
 
 	// report
 	tmpl := template.Must(template.ParseFS(templates, "templates/*.html"))

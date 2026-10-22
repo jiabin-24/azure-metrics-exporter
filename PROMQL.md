@@ -96,10 +96,9 @@ params:
 <a id="json-window"></a>
 ### 完整时间窗口 JSON
 
-在 scraper job 顶层选择 `workspaces`，并在 `params` 中设置 JSON 输出及查询参数：
+scraper 的 PromQL job 自动采集 exporter 配置的全部 workspace，只需在 `params` 中设置 JSON 输出及查询参数：
 
 ```yaml
-workspaces: ["workspace-a"]
 params:
   query: ['sum(rate(apiserver_request_total{cluster="prod"}[5m])) by (cluster, code)']
   start: ["2026-10-21T12:00:00Z"]

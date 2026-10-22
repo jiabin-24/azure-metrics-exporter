@@ -19,5 +19,6 @@ const (
 	ProbeMetricsResourceGraphTimeoutDefault = 120
 
 	ProbeMetricsPromQLUrl            = "/probe/metrics/promql"
+	ProbeMetricsPromQLWorkspacesUrl  = ProbeMetricsPromQLUrl + "/workspaces"
 	ProbeMetricsPromQLTimeoutDefault = 120
 )

@@ -18,7 +18,6 @@ global:
   scrape_timeout: 30s
 scrape_configs:
   - job_name: azure-control-plane
-    workspaces: ["workspace-a"]
     metrics_path: /probe/metrics/promql
     honor_timestamps: true
     params:
@@ -53,7 +52,9 @@ scrape_configs:
 
 exporter 使用 [workspace 配置文件](../config/prometheus-workspaces.example.yaml)，通过 `AZURE_PROMETHEUS_WORKSPACES_FILE` 指定路径。旧的单 endpoint 环境变量不再支持，只有一个 workspace 时也使用同一配置格式。
 
-scraper 在 PromQL job 顶层设置 `workspaces: ["workspace-a", "workspace-b"]`，复用同一查询、周期和滚动窗口，每次请求只传一个 workspace。列表必须非空、别名合法且不重复；不支持 `params.workspace`，避免把重复参数误当作多个任务。非 PromQL job 不配置 `workspaces`。
+每个 PromQL job 固定采集对应 exporter 配置中的全部 workspace，复用同一查询、周期和滚动窗口，无需也不允许配置 `workspaces` 或 `params.workspace`，旧配置会在启动时报错。平台指标及 `/metrics` job 不受影响，不调用 workspace 发现接口。
+
+scraper 启动时通过每个 target 的 `GET /probe/metrics/promql/workspaces` 获取全部别名，展开为独立任务；每次请求内部仍只传一个具体 workspace，按具体 workspace 生成 taskId、分片和发送来源信息，不扫描 Azure 订阅中的其他 workspace。同一 target 的列表在本次启动内复用；接口不可用、返回空列表或非法数据时启动失败，不静默漏采或回退。不同副本及同一 exporter Service 后的实例必须使用相同 workspace 映射；exporter 新增或移除 workspace 后需重启 scraper 重新发现，不支持运行时自动刷新。
 
 每个任务由 `(job_name, workspace, exporter target)` 的 JSON 数组计算 SHA-256 得到稳定 `taskId`。memberlist 负责成员发现和故障检测；scraper 对每个任务与当前成员名计算 Rendezvous Hashing，得分最高的成员执行任务。平台指标及 `/metrics` 同样按 job 和 target 分配，workspace 为空。成员加入、离开或故障剔除后自动重新分配；未改变归属的任务继续运行，不重启定时器。不能把一个任务拆到多个实例，也不保证负载绝对均衡。
 
@@ -152,7 +153,6 @@ PromQL 与平台指标使用相同的 `params.format: ["json"]`，无需增加�
 
 ```yaml
 - job_name: azure-control-plane-window
-  workspaces: ["workspace-a"]
   scrape_interval: 3m
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
@@ -174,7 +174,6 @@ PromQL 与平台指标使用相同的 `params.format: ["json"]`，无需增加�
 
 ```yaml
 - job_name: azure-control-plane
-  workspaces: ["workspace-a"]
   scrape_interval: 1m
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
@@ -210,7 +209,7 @@ go run .\cmd\metrics-scraper --config.file=.\scraper.yaml --web.listen-address=:
 
 ## Kubernetes 部署
 
-[部署清单](deploy/metrics-scraper.yaml) 包含 ConfigMap、双副本 Deployment 和一个 Headless Service，job 使用 `workspace-a`。配置只读挂载到 `/etc/azure-metrics-scraper/scraper.yaml`。Headless Service 的 DNS 返回 Pod IP，`publishNotReadyAddresses: true` 允许尚未就绪的 Pod 自举，避免必须先 ready 才能互相发现的循环依赖。示例使用 IPv4 Pod IP 广播成员地址。
+[部署清单](deploy/metrics-scraper.yaml) 包含 ConfigMap、双副本 Deployment 和一个 Headless Service，PromQL job 自动采集 exporter 配置的全部 workspace。配置只读挂载到 `/etc/azure-metrics-scraper/scraper.yaml`。Headless Service 的 DNS 返回 Pod IP，`publishNotReadyAddresses: true` 允许尚未就绪的 Pod 自举，避免必须先 ready 才能互相发现的循环依赖。示例使用 IPv4 Pod IP 广播成员地址。
 
 可以直接修改 Deployment 的 replicas，或使用 HPA，无须提前配置 total/index。滚动更新和扩缩容由成员发现触发任务迁移；不承诺切换期间无重复/无丢点。无须 StatefulSet、Kubernetes API 客户端、Lease 或新增 RBAC。
 

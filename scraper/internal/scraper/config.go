@@ -64,7 +64,6 @@ type EventHubConfig struct {
 
 type Job struct {
 	Name            string              `yaml:"job_name"`
-	Workspaces      []string            `yaml:"workspaces"`
 	Interval        Duration            `yaml:"scrape_interval"`
 	Timeout         Duration            `yaml:"scrape_timeout"`
 	Scheme          string              `yaml:"scheme"`
@@ -73,6 +72,7 @@ type Job struct {
 	HonorTimestamps *bool               `yaml:"honor_timestamps"`
 	StaticConfigs   []StaticConfig      `yaml:"static_configs"`
 	RollingRange    *RollingRange       `yaml:"rolling_range"`
+	workspaces      []string
 }
 
 type RollingRange struct {
@@ -163,21 +163,7 @@ func ParseConfig(data []byte) (*Config, error) {
 			job.MetricsPath = "/metrics"
 		}
 		if _, exists := job.Params["workspace"]; exists {
-			return nil, fmt.Errorf("job %q: use job.workspaces instead of params.workspace", job.Name)
-		}
-		if job.MetricsPath == config.ProbeMetricsPromQLUrl {
-			if len(job.Workspaces) == 0 {
-				return nil, fmt.Errorf("job %q: PromQL requires a nonempty workspaces list", job.Name)
-			}
-			seen := make(map[string]bool)
-			for _, workspace := range job.Workspaces {
-				if !config.ValidWorkspaceName(workspace) || seen[workspace] {
-					return nil, fmt.Errorf("job %q: invalid or duplicate workspace %q", job.Name, workspace)
-				}
-				seen[workspace] = true
-			}
-		} else if job.Workspaces != nil {
-			return nil, fmt.Errorf("job %q: workspaces is only supported on /probe/metrics/promql", job.Name)
+			return nil, fmt.Errorf("job %q: params.workspace is unsupported; all workspaces are discovered automatically", job.Name)
 		}
 		if job.RollingRange != nil {
 			if job.MetricsPath != config.ProbeMetricsPromQLUrl ||

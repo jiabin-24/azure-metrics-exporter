@@ -132,6 +132,30 @@ func probeMetricsPromQLHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func promQLWorkspacesHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if len(prometheusWorkspaces) == 0 {
+		http.Error(w, "Azure Monitor Prometheus workspaces are not configured", http.StatusServiceUnavailable)
+		return
+	}
+	names := make([]string, 0, len(prometheusWorkspaces))
+	for name := range prometheusWorkspaces {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if err := json.NewEncoder(w).Encode(struct {
+		Workspaces []string `json:"workspaces"`
+	}{names}); err != nil {
+		buildContextLoggerFromRequest(r).With(slog.Any("error", err)).Error("unable to write workspace list response")
+	}
+}
+
 func resolvePromQLWorkspace(params url.Values, workspaces map[string]string) (string, int, error) {
 	values := params["workspace"]
 	if len(values) != 1 || !config.ValidWorkspaceName(values[0]) {

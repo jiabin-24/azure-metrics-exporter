@@ -245,13 +245,13 @@ func TestClusterJoinRetriesAndGatesTasks(t *testing.T) {
 	job := testJob(strings.TrimPrefix(server.URL, "http://"))
 	job.Interval = Duration(time.Hour)
 	for i := range 100 {
-		job.Workspaces = []string{fmt.Sprintf("workspace-%d", i)}
-		if taskOwner(taskID(job.Name, job.Workspaces[0], job.StaticConfigs[0].Targets[0]),
+		job.workspaces = []string{fmt.Sprintf("workspace-%d", i)}
+		if taskOwner(taskID(job.Name, job.workspaces[0], job.StaticConfigs[0].Targets[0]),
 			[]string{"waiting", "seed"}) == "seed" {
 			break
 		}
 	}
-	if taskOwner(taskID(job.Name, job.Workspaces[0], job.StaticConfigs[0].Targets[0]),
+	if taskOwner(taskID(job.Name, job.workspaces[0], job.StaticConfigs[0].Targets[0]),
 		[]string{"waiting", "seed"}) != "seed" {
 		t.Fatal("could not select task initially owned by seed")
 	}
@@ -324,7 +324,7 @@ func TestClusterWorkerHandoffPreservesUnchangedTasks(t *testing.T) {
 	job := testJob(strings.TrimPrefix(server.URL, "http://"))
 	job.Timeout, job.Interval = Duration(time.Hour), Duration(time.Hour)
 	for i := range 20 {
-		job.Workspaces = append(job.Workspaces, fmt.Sprintf("workspace-%d", i))
+		job.workspaces = append(job.workspaces, fmt.Sprintf("workspace-%d", i))
 	}
 	cfg := &Config{Jobs: []Job{job}}
 	first := testCluster(t, cfg, "first")
@@ -344,7 +344,7 @@ func TestClusterWorkerHandoffPreservesUnchangedTasks(t *testing.T) {
 		}
 		return values
 	}
-	receive(started, len(job.Workspaces))
+	receive(started, len(job.workspaces))
 	second := testCluster(t, cfg, "second", first.list.LocalNode().Address())
 	waitFor(t, "handoff membership", func() bool {
 		return second.Ready() && len(first.Members()) == 2 && len(second.Members()) == 2
@@ -355,7 +355,7 @@ func TestClusterWorkerHandoffPreservesUnchangedTasks(t *testing.T) {
 			moved[task.Job.Params["workspace"][0]] = true
 		}
 	}
-	if len(moved) == 0 || len(moved) == len(job.Workspaces) {
+	if len(moved) == 0 || len(moved) == len(job.workspaces) {
 		t.Fatal("test requires both retained and moved tasks")
 	}
 	for _, workspace := range receive(canceled, len(moved)) {
@@ -382,7 +382,7 @@ func TestClusterWorkerHandoffPreservesUnchangedTasks(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for _, workspace := range job.Workspaces {
+	for _, workspace := range job.workspaces {
 		want := 1
 		if moved[workspace] {
 			want = 3
@@ -401,7 +401,7 @@ func TestClusterDetectsAbruptFailure(t *testing.T) {
 	job := testJob(strings.TrimPrefix(server.URL, "http://"))
 	job.Interval = Duration(time.Hour)
 	for i := range 20 {
-		job.Workspaces = append(job.Workspaces, fmt.Sprintf("workspace-%d", i))
+		job.workspaces = append(job.workspaces, fmt.Sprintf("workspace-%d", i))
 	}
 	cfg := &Config{Jobs: []Job{job}}
 	first := testCluster(t, cfg, "first")
@@ -423,7 +423,7 @@ func TestClusterDetectsAbruptFailure(t *testing.T) {
 	defer stopFirst()
 	defer stopSecond()
 	seen := make(map[string]bool)
-	for range job.Workspaces {
+	for range job.workspaces {
 		select {
 		case batch := <-delivered:
 			if seen[batch.TaskID] {
@@ -440,7 +440,7 @@ func TestClusterDetectsAbruptFailure(t *testing.T) {
 			lost[task.ID] = true
 		}
 	}
-	if len(lost) == 0 || len(lost) == len(job.Workspaces) {
+	if len(lost) == 0 || len(lost) == len(job.workspaces) {
 		t.Fatal("test requires both unaffected and reassigned tasks")
 	}
 	stopSecond()

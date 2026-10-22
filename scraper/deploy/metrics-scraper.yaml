@@ -16,7 +16,7 @@ data:
       name: shein-aks-metrics
     scrape_configs:
       - job_name: azure-control-plane
-        workspaces: ["workspace-a"]
+        # Automatically collects every workspace configured in the exporter.
         metrics_path: /probe/metrics/promql
         honor_timestamps: true
         rolling_range:

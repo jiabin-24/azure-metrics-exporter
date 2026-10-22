@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -12,7 +14,7 @@ import (
 func TestResolvePromQLWorkspace(t *testing.T) {
 	workspaces := map[string]string{"a": "https://a.example.com", "b": "https://b.example.com"}
 	for _, params := range []url.Values{
-		nil, {"workspace": {""}}, {"workspace": {"unknown"}},
+		nil, {"workspace": {""}}, {"workspace": {"unknown"}}, {"workspace": {"*"}},
 		{"workspace": {"a", "b"}}, {"workspace": {"https://other.example.com"}},
 	} {
 		if _, status, err := resolvePromQLWorkspace(params, workspaces); status != 400 || err == nil {
@@ -28,6 +30,36 @@ func TestResolvePromQLWorkspace(t *testing.T) {
 	}
 	if got, status, err := resolvePromQLWorkspace(url.Values{"workspace": {"a"}}, single); status != 200 || err != nil || got != single["a"] {
 		t.Fatalf("single workspace route failed: %q status=%d err=%v", got, status, err)
+	}
+}
+
+func TestPromQLWorkspacesHandler(t *testing.T) {
+	previous := prometheusWorkspaces
+	t.Cleanup(func() { prometheusWorkspaces = previous })
+	prometheusWorkspaces = map[string]string{"b": "https://b.example.com", "a": "https://a.example.com"}
+	recorder := httptest.NewRecorder()
+	promQLWorkspacesHandler(recorder, httptest.NewRequest(http.MethodGet, "/probe/metrics/promql/workspaces", nil))
+	var result struct {
+		Workspaces []string `json:"workspaces"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || !reflect.DeepEqual(result.Workspaces, []string{"a", "b"}) ||
+		!strings.HasPrefix(recorder.Header().Get("Content-Type"), "application/json") ||
+		strings.Contains(recorder.Body.String(), "example.com") {
+		t.Fatalf("unexpected workspace inventory: %+v", recorder)
+	}
+	recorder = httptest.NewRecorder()
+	promQLWorkspacesHandler(recorder, httptest.NewRequest(http.MethodPost, "/probe/metrics/promql/workspaces", nil))
+	if recorder.Code != http.StatusMethodNotAllowed || recorder.Header().Get("Allow") != http.MethodGet {
+		t.Fatal("workspace inventory must only accept GET")
+	}
+	prometheusWorkspaces = nil
+	recorder = httptest.NewRecorder()
+	promQLWorkspacesHandler(recorder, httptest.NewRequest(http.MethodGet, "/probe/metrics/promql/workspaces", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatal("unconfigured workspace inventory must return 503")
 	}
 }
 

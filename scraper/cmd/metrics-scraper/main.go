@@ -51,6 +51,11 @@ func run(ctx context.Context, configPath, address string, logger *slog.Logger) (
 	} else {
 		logger.Warn("Event Hub is not configured; collected batches will be discarded")
 	}
+	worker := scraper.New(cfg, logger, sink)
+	defer worker.Client.CloseIdleConnections()
+	if err := worker.ResolveWorkspaces(ctx); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var cluster *scraper.Cluster
@@ -90,7 +95,6 @@ func run(ctx context.Context, configPath, address string, logger *slog.Logger) (
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
-		worker := scraper.New(cfg, logger, sink)
 		worker.Cluster = cluster
 		worker.Run(ctx)
 	}()

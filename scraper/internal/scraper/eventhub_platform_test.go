@@ -25,7 +25,6 @@ event_hub:
   name: metrics
 scrape_configs:
 - job_name: promql
-  workspaces: [workspace-a]
   metrics_path: /probe/metrics/promql
   params:
     format: [json]

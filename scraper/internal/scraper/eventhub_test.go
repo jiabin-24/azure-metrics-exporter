@@ -359,7 +359,6 @@ event_hub:
   name: metrics
 scrape_configs:
 - job_name: controlplane
-  workspaces: [workspace-a]
   metrics_path: /probe/metrics/promql
   params:
     query: [up]

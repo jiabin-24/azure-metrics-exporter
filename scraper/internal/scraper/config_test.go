@@ -16,7 +16,6 @@ scrape_configs:
   - job_name: promql
     scrape_interval: 5s
     metrics_path: /probe/metrics/promql
-    workspaces: [workspace-a]
     honor_timestamps: true
     params:
       query: ['sum(rate(requests_total{cluster="prod"}[5m]))', 'up']
