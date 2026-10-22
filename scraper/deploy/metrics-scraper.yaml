@@ -7,11 +7,16 @@ data:
     global:
       scrape_interval: 1m
       scrape_timeout: 30s
+    cluster:
+      name: azure-metrics-scraper
+      bind_address: 0.0.0.0:7946
+      join: ["azure-metrics-scraper-gossip:7946"]
     event_hub:
       namespace: shein-aks-metrics.servicebus.windows.net
       name: shein-aks-metrics
     scrape_configs:
       - job_name: azure-control-plane
+        workspaces: ["workspace-a"]
         metrics_path: /probe/metrics/promql
         honor_timestamps: true
         rolling_range:
@@ -34,9 +39,9 @@ kind: Deployment
 metadata:
   name: azure-metrics-scraper
 spec:
-  replicas: 1
+  replicas: 2
   strategy:
-    type: Recreate
+    type: RollingUpdate
   selector:
     matchLabels:
       app: azure-metrics-scraper
@@ -46,7 +51,7 @@ spec:
         app: azure-metrics-scraper
     spec:
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 15
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -63,6 +68,12 @@ spec:
             - --config.file=/etc/azure-metrics-scraper/scraper.yaml
             - --web.listen-address=:8081
           env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: SCRAPER_CLUSTER_ADVERTISE_ADDRESS
+              value: "$(POD_IP):7946"
             - name: AZURE_EVENTHUB_CONNECTION_STRING
               valueFrom:
                 secretKeyRef:
@@ -71,6 +82,12 @@ spec:
           ports:
             - name: health
               containerPort: 8081
+            - name: gossip-tcp
+              containerPort: 7946
+              protocol: TCP
+            - name: gossip-udp
+              containerPort: 7946
+              protocol: UDP
           readinessProbe:
             httpGet:
               path: /readyz
@@ -103,3 +120,22 @@ spec:
         - name: config
           configMap:
             name: azure-metrics-scraper
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: azure-metrics-scraper-gossip
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: azure-metrics-scraper
+  ports:
+    - name: gossip-tcp
+      port: 7946
+      targetPort: gossip-tcp
+      protocol: TCP
+    - name: gossip-udp
+      port: 7946
+      targetPort: gossip-udp
+      protocol: UDP

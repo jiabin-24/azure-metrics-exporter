@@ -335,6 +335,14 @@ count</textarea>
             </div>
 
             <div class="mb-3 row" query-endpoint="/probe/metrics/promql">
+                <label for="workspace" class="col-sm-2 col-form-label">workspace</label>
+                <div class="col-sm-10">
+                    <input type="text" class="form-control" id="workspace" placeholder="Required: configured workspace alias">
+                    <div class="form-text">Select one configured alias, including when only one workspace is configured.</div>
+                </div>
+            </div>
+
+            <div class="mb-3 row" query-endpoint="/probe/metrics/promql">
                 <label for="time" class="col-sm-2 col-form-label">time</label>
                 <div class="col-sm-10">
                     <input type="text" class="form-control" id="time" placeholder="Optional: RFC3339 or Unix seconds">
@@ -517,6 +525,7 @@ count</textarea>
                         queryEndpoint = fieldValue;
                         break;
                     case "query":
+                    case "workspace":
                     case "time":
                     case "query_delay":
                     case "start":
@@ -549,6 +558,10 @@ count</textarea>
 
             if (queryEndpoint) {
                 if (queryEndpoint === "/probe/metrics/promql") {
+                    if (!queryParams.workspace) {
+                        alert("Workspace alias is required");
+                        return;
+                    }
                     if (!queryParams.query) {
                         alert("PromQL query is required");
                         return;

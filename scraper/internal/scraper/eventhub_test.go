@@ -3,6 +3,7 @@ package scraper
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,7 @@ func eventTestBatch() Batch {
 	start := time.Date(2026, 10, 21, 15, 0, 26, 123000000, time.UTC)
 	return Batch{
 		Job: "controlplane", Query: "apiserver_request_total", Interval: time.Minute,
+		Workspace: "workspace-a",
 		Window: &metricdata.Window{
 			SchemaVersion: "1.0", Source: metricdata.PrometheusSource,
 			Metrics: []metricdata.Series{
@@ -58,7 +60,8 @@ func TestEventHubEnvelopeMatchesExampleAndPreservesData(t *testing.T) {
 	if err := eventHubSink(sender, quietLogger())(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
-	if len(sender.bodies) != 1 || sender.keys[0] != "prod" {
+	wantKey := fmt.Sprintf("%x", sha256.Sum256([]byte("workspace-a\x00prod")))
+	if len(sender.bodies) != 1 || sender.keys[0] != wantKey {
 		t.Fatalf("incorrect events or partition key: %+v", sender)
 	}
 	var got exportWindow
@@ -73,7 +76,7 @@ func TestEventHubEnvelopeMatchesExampleAndPreservesData(t *testing.T) {
 		!reflect.DeepEqual(got.Metrics[0].Samples, series.Samples) || !reflect.DeepEqual(got.Metrics[0].Labels, series.Labels) {
 		t.Fatalf("incorrect export: %+v", got)
 	}
-	example := []byte(`{"schemaVersion":"1.0","source":"aks-controlplane","cluster":"aks-ae-cluster-1","region":"australiaeast","windowStart":"2026-10-15T12:24:15Z","windowEnd":"2026-10-15T12:27:15Z","scrapeInterval":"15s","metrics":[{"name":"apiserver_request_rate_by_code","promql":"sum(rate(apiserver_request_total[5m])) by (cluster, code)","labels":{"code":"200"},"samples":[["2026-10-15T12:24:15Z",7610.422923976607]]}]}`)
+	example := []byte(`{"schemaVersion":"1.0","source":"aks-controlplane","workspace":"workspace-a","cluster":"aks-ae-cluster-1","region":"australiaeast","windowStart":"2026-10-15T12:24:15Z","windowEnd":"2026-10-15T12:27:15Z","scrapeInterval":"15s","metrics":[{"name":"apiserver_request_rate_by_code","promql":"sum(rate(apiserver_request_total[5m])) by (cluster, code)","labels":{"code":"200"},"samples":[["2026-10-15T12:24:15Z",7610.422923976607]]}]}`)
 	var expected, actual map[string]json.RawMessage
 	if err := json.Unmarshal(example, &expected); err != nil {
 		t.Fatal(err)
@@ -356,6 +359,7 @@ event_hub:
   name: metrics
 scrape_configs:
 - job_name: controlplane
+  workspaces: [workspace-a]
   metrics_path: /probe/metrics/promql
   params:
     query: [up]

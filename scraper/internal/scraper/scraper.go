@@ -21,6 +21,8 @@ const MaxBodyBytes = 16 << 20
 
 type Batch struct {
 	Job         string
+	Workspace   string
+	TaskID      string
 	Target      string
 	Labels      map[string]string
 	ScrapedAt   time.Time
@@ -37,10 +39,11 @@ type Batch struct {
 type Sink func(context.Context, Batch) error
 
 type Scraper struct {
-	Config *Config
-	Client *http.Client
-	Logger *slog.Logger
-	Sink   Sink
+	Config  *Config
+	Cluster *Cluster
+	Client  *http.Client
+	Logger  *slog.Logger
+	Sink    Sink
 }
 
 func New(cfg *Config, logger *slog.Logger, sink Sink) *Scraper {
@@ -58,18 +61,81 @@ func New(cfg *Config, logger *slog.Logger, sink Sink) *Scraper {
 }
 
 func (s *Scraper) Run(ctx context.Context) {
+	defer s.Client.CloseIdleConnections()
+	tasks := s.Config.Tasks()
+	if s.Cluster != nil {
+		s.runClusterTasks(ctx, tasks)
+		return
+	}
 	var workers sync.WaitGroup
-	for _, job := range s.Config.Jobs {
-		for _, group := range job.StaticConfigs {
-			for _, target := range group.Targets {
-				workers.Go(func() {
-					s.runTarget(ctx, job, target, group.Labels)
-				})
-			}
-		}
+	s.Logger.Info("standalone tasks assigned", "tasks", len(tasks))
+	for _, task := range tasks {
+		workers.Go(func() {
+			s.runTarget(ctx, task.Job, task.Target, task.Labels)
+		})
 	}
 	workers.Wait()
-	s.Client.CloseIdleConnections()
+}
+
+func (s *Scraper) runClusterTasks(ctx context.Context, tasks []Task) {
+	type runner struct {
+		cancel context.CancelFunc
+		done   chan struct{}
+	}
+	running := make(map[string]runner)
+	defer func() {
+		for _, task := range running {
+			task.cancel()
+		}
+		for _, task := range running {
+			<-task.done
+		}
+	}()
+	reconcile := func() {
+		members := s.Cluster.Members()
+		wanted := make(map[string]Task)
+		if s.Cluster.Ready() {
+			for _, task := range tasks {
+				if taskOwner(task.ID, members) == s.Cluster.Name() {
+					wanted[task.ID] = task
+				}
+			}
+		}
+		for id, task := range running {
+			if _, keep := wanted[id]; !keep {
+				task.cancel()
+			}
+		}
+		for id, task := range running {
+			if _, keep := wanted[id]; !keep {
+				<-task.done
+				delete(running, id)
+			}
+		}
+		for id, task := range wanted {
+			if _, exists := running[id]; exists {
+				continue
+			}
+			taskCtx, cancel := context.WithCancel(ctx)
+			done := make(chan struct{})
+			running[id] = runner{cancel, done}
+			go func() {
+				defer close(done)
+				s.runTarget(taskCtx, task.Job, task.Target, task.Labels)
+			}()
+		}
+		s.Logger.Info("cluster tasks assigned", "node", s.Cluster.Name(),
+			"members", members, "ready", s.Cluster.Ready(), "tasks", len(running))
+	}
+	reconcile()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.Cluster.Changes():
+			reconcile()
+		}
+	}
 }
 
 func (s *Scraper) runTarget(ctx context.Context, job Job, target string, labels map[string]string) {
@@ -83,7 +149,7 @@ func (s *Scraper) runTarget(ctx context.Context, job Job, target string, labels 
 		err := s.Scrape(ctx, job, target, labels)
 		if err != nil && ctx.Err() == nil {
 			s.Logger.Error("scrape failed", "job", job.Name, "target", target,
-				"duration", time.Since(start), "error", err)
+				"workspace", workspaceFor(job), "duration", time.Since(start), "error", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -129,6 +195,7 @@ func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map
 		ContentType: resp.Header.Get("Content-Type"), Metrics: body,
 		Interval:    time.Duration(job.Interval),
 		MetricsPath: job.MetricsPath, Params: job.Params,
+		Workspace: workspaceFor(job), TaskID: taskID(job.Name, workspaceFor(job), target),
 	}
 	if len(job.Params["query"]) == 1 {
 		batch.Query = job.Params["query"][0]
@@ -143,7 +210,7 @@ func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map
 	if expectJSON && mediaType != "application/json" {
 		return fmt.Errorf("expected application/json for format=json, received %q", batch.ContentType)
 	}
-	logger := s.Logger
+	logger := s.Logger.With("workspace", batch.Workspace, "task_id", batch.TaskID)
 	if job.RollingRange != nil {
 		logger = logger.With("query_start", job.Params["start"][0],
 			"query_end", job.Params["end"][0], "query_step", job.Params["step"][0])
@@ -180,10 +247,18 @@ func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map
 	return nil
 }
 
+func workspaceFor(job Job) string {
+	if values := job.Params["workspace"]; len(values) == 1 {
+		return values[0]
+	}
+	return ""
+}
+
 func DiscardSink(logger *slog.Logger) Sink {
 	return func(_ context.Context, batch Batch) error {
 		logger.Info("Event Hub not configured; discarding batch",
-			"job", batch.Job, "target", batch.Target, "bytes", len(batch.Metrics))
+			"job", batch.Job, "target", batch.Target, "workspace", batch.Workspace,
+			"task_id", batch.TaskID, "bytes", len(batch.Metrics))
 		return nil
 	}
 }

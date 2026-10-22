@@ -92,9 +92,9 @@ func probeMetricsPromQLHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	endpoint := Opts.Azure.Prometheus.QueryEndpoint
-	if endpoint == "" {
-		http.Error(w, "Azure Monitor workspace Prometheus query endpoint is not configured", http.StatusServiceUnavailable)
+	endpoint, status, err := resolvePromQLWorkspace(params, prometheusWorkspaces)
+	if err != nil {
+		http.Error(w, err.Error(), status)
 		return
 	}
 	if AzureClient == nil {
@@ -126,9 +126,25 @@ func probeMetricsPromQLHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Azure-Monitor-Workspace", params.Get("workspace"))
 	if _, err := io.WriteString(w, metrics); err != nil { // #nosec G705 -- Prometheus text or encoded JSON, never HTML; explicit Content-Type and nosniff prevent HTML interpretation.
 		contextLogger.With(slog.Any("error", err)).Error("unable to write PromQL metrics response")
 	}
+}
+
+func resolvePromQLWorkspace(params url.Values, workspaces map[string]string) (string, int, error) {
+	values := params["workspace"]
+	if len(values) != 1 || !config.ValidWorkspaceName(values[0]) {
+		return "", http.StatusBadRequest, errors.New("workspace requires exactly one valid workspace alias")
+	}
+	if len(workspaces) == 0 {
+		return "", http.StatusServiceUnavailable, errors.New("Azure Monitor Prometheus workspaces are not configured")
+	}
+	endpoint, ok := workspaces[values[0]]
+	if !ok {
+		return "", http.StatusBadRequest, fmt.Errorf("unknown workspace %q", values[0])
+	}
+	return endpoint, http.StatusOK, nil
 }
 
 func collectPromQLMetrics(
@@ -218,6 +234,7 @@ func preparePromQLQueryParams(params url.Values, now time.Time) (url.Values, err
 		queryParams[name] = append([]string(nil), values...)
 	}
 	queryParams.Del("format")
+	queryParams.Del("workspace")
 	rangeQuery := params.Has("start") || params.Has("end") || params.Has("step")
 	if params.Has("query_delay") {
 		if params.Has("time") || rangeQuery {

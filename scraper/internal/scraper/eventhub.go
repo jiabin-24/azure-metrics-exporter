@@ -29,6 +29,8 @@ type exportMetric struct {
 type exportWindow struct {
 	SchemaVersion  string         `json:"schemaVersion"`
 	Source         string         `json:"source"`
+	Workspace      string         `json:"workspace,omitempty"`
+	TaskID         string         `json:"taskId,omitempty"`
 	Cluster        string         `json:"cluster,omitempty"`
 	ResourceID     string         `json:"resourceId,omitempty"`
 	Query          *exportQuery   `json:"query,omitempty"`
@@ -109,6 +111,7 @@ func NewEventHubSink(cfg EventHubConfig, logger *slog.Logger) (Sink, func(contex
 
 func eventHubSink(sender eventSender, logger *slog.Logger) Sink {
 	return func(ctx context.Context, batch Batch) error {
+		logger := logger.With("workspace", batch.Workspace, "task_id", batch.TaskID)
 		windows, err := exportWindows(batch)
 		if err != nil {
 			return err
@@ -204,9 +207,10 @@ func exportWindows(batch Batch) ([]exportWindow, error) {
 		if window == nil {
 			window = &exportWindow{
 				SchemaVersion: metricdata.SchemaVersion, Source: "aks-controlplane",
+				Workspace: batch.Workspace, TaskID: batch.TaskID,
 				Cluster: cluster, Region: region, ScrapeInterval: batch.Interval.String(),
 				Metrics:      make([]exportMetric, 0),
-				partitionKey: cluster,
+				partitionKey: fmt.Sprintf("%x", sha256.Sum256([]byte(batch.Workspace+"\x00"+cluster))),
 			}
 			if platform {
 				window.Source, window.ResourceID = metricdata.Source, resourceID

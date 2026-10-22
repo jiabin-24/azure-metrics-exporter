@@ -51,15 +51,31 @@ func run(ctx context.Context, configPath, address string, logger *slog.Logger) (
 	} else {
 		logger.Warn("Event Hub is not configured; collected batches will be discarded")
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var cluster *scraper.Cluster
+	if cfg.Cluster != nil {
+		cluster, err = scraper.NewCluster(ctx, cfg, logger)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := cluster.Close(); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("close memberlist: %w", err))
+			}
+		}()
+	}
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return fmt.Errorf("listen for health checks: %w", err)
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	mux := http.NewServeMux()
 	for _, path := range []string{"/healthz", "/readyz"} {
 		mux.HandleFunc(path, func(w http.ResponseWriter, _ *http.Request) {
+			if path == "/readyz" && cluster != nil && !cluster.Ready() {
+				http.Error(w, "Waiting for initial cluster join", http.StatusServiceUnavailable)
+				return
+			}
 			if _, err := fmt.Fprintln(w, "Ok"); err != nil {
 				logger.Error("write health response", "error", err)
 			}
@@ -74,7 +90,9 @@ func run(ctx context.Context, configPath, address string, logger *slog.Logger) (
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
-		scraper.New(cfg, logger, sink).Run(ctx)
+		worker := scraper.New(cfg, logger, sink)
+		worker.Cluster = cluster
+		worker.Run(ctx)
 	}()
 	logger.Info("scraper started",
 		"jobs", len(cfg.Jobs), "health_address", listener.Addr().String())

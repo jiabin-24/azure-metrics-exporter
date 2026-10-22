@@ -18,6 +18,7 @@ global:
   scrape_timeout: 30s
 scrape_configs:
   - job_name: azure-control-plane
+    workspaces: ["workspace-a"]
     metrics_path: /probe/metrics/promql
     honor_timestamps: true
     params:
@@ -40,13 +41,83 @@ scrape_configs:
 - job 名称必须非空且唯一。支持 `scheme`（`http` / `https`）、`metrics_path`（默认 `/metrics`）、`params`（值为字符串列表，可多值）和 `static_configs.targets` / `labels`。
 - target 使用 `host[:port]`，不包含协议、路径或认证信息；IPv6 使用方括号。相同 job 内 target 不可重复。
 - 默认将 `params` 原样 URL 编码后发送到 exporter；启用 `rolling_range` 的 PromQL job 会在每次请求时额外生成 `start/end/step`。这里只请求 exporter，不直接请求 Azure。PromQL 的 `query_delay` 等规则见 [PROMQL 文档](../PROMQL.md)。
-- 立即执行第一次抓取，然后按每个 job 的周期调度。不同 target 独立运行，同一 target 不重叠抓取；失败记录错误日志，下一个周期继续，绝不复用旧结果或补零。
+- 本实例负责的任务立即执行第一次抓取，然后按每个 job 的周期调度。每个 `job × workspace × target` 独立运行，同一任务不重叠抓取；失败记录错误日志，下一个周期继续，绝不复用旧结果或补零。
 - 限制单次响应为 16 MiB；只接受 HTTP 200 和合法的 Prometheus 文本或本项目的指标窗口 JSON（允许空结果）。JSON 的 `source` 支持平台指标的 `azure-monitor` 和 PromQL 的 `azure-prometheus`。不跟随 HTTP 重定向。请求和响应读取均受超时与退出信号约束。
 - 原始响应及源时间戳不做修改；只支持 `honor_timestamps: true`（或省略）。job、target、静态 labels、采集时间、Content-Type 和原始响应进入 batch；两类窗口 JSON 均保留解析后的全部序列和采样点，留给后续发送逻辑使用。**静态 labels 是 batch 元数据，不会注入或改写指标，也不实现 Prometheus 的 job/instance 标签合并规则。**
 - 不实现服务发现、relabel、认证配置、本地 PromQL 计算、TSDB、历史补采或完整 OpenMetrics/protobuf 协议。未知配置字段、重复 YAML 键、非法周期等会在启动时直接报错退出，不会静默忽略。
 - 配置在启动时读取，不支持热加载。本地修改后重启进程；Kubernetes 修改 ConfigMap 后执行 `apply` 和 `rollout restart`，无需重新构建镜像。
 
 对于 `30s` probe 抓取超时，应协调 exporter 的写超时，例如设置 `--server.timeout.write=120s`，避免 exporter 默认 `10s` 提前结束响应。
+
+## 多 workspace 与 memberlist 分片
+
+exporter 使用 [workspace 配置文件](../config/prometheus-workspaces.example.yaml)，通过 `AZURE_PROMETHEUS_WORKSPACES_FILE` 指定路径。旧的单 endpoint 环境变量不再支持，只有一个 workspace 时也使用同一配置格式。
+
+scraper 在 PromQL job 顶层设置 `workspaces: ["workspace-a", "workspace-b"]`，复用同一查询、周期和滚动窗口，每次请求只传一个 workspace。列表必须非空、别名合法且不重复；不支持 `params.workspace`，避免把重复参数误当作多个任务。非 PromQL job 不配置 `workspaces`。
+
+每个任务由 `(job_name, workspace, exporter target)` 的 JSON 数组计算 SHA-256 得到稳定 `taskId`。memberlist 负责成员发现和故障检测；scraper 对每个任务与当前成员名计算 Rendezvous Hashing，得分最高的成员执行任务。平台指标及 `/metrics` 同样按 job 和 target 分配，workspace 为空。成员加入、离开或故障剔除后自动重新分配；未改变归属的任务继续运行，不重启定时器。不能把一个任务拆到多个实例，也不保证负载绝对均衡。
+
+**单机无需配置 `cluster`，不监听 gossip 端口。** 多实例启用以下配置，不再使用 `sharding.total/index` 或 `SCRAPER_SHARD_TOTAL/INDEX`：
+
+```yaml
+cluster:
+  name: azure-metrics-scraper
+  bind_address: 0.0.0.0:7946
+  # 所有实例必须能直接访问 advertise_address；省略时由 memberlist 选择私网地址。
+  # advertise_address: 10.0.0.2:7946
+  join: ["scraper-seed:7946"]
+  retry_interval: 5s
+```
+
+`name` 为集群隔离标签，默认 `azure-metrics-scraper`；不同采集集群使用不同名称和种子。`join` 是初始发现地址，可使用返回成员 IP 的 DNS，按 `retry_interval` 持续重试，以处理启动顺序、DNS 变化及网络恢复。必须放行成员间 **7946 TCP 和 UDP**，不是只放行健康检查端口。默认节点名为 `hostname-随机 UUID`，无需提前分配编号；可配置唯一 `node_name`，同一集群不可重名。同一台机器运行多个进程时，应使用不同的绑定端口和健康检查端口。绑定、广播及种子地址均须使用 `1..65535` 的实际端口。
+
+配置了种子时，首次成功加入前不采集，`/readyz` 返回 503；失败记录日志并重试，而不是默默作为独立实例全量采集。`join: []` 表示显式建立新集群，可作为本地首个种子节点，其他实例再加入它；**不要给所有独立启动的实例都配置空种子**。用于自举的共享 DNS 可以包含本机，因此必须搭配持续发现和互通的网络；成员分裂后仍可能暂时各自采集。成功加入后即使其他节点全部故障，也由剩余实例继续采集。
+
+环境变量 `SCRAPER_CLUSTER_NODE_NAME`、`SCRAPER_CLUSTER_BIND_ADDRESS`、`SCRAPER_CLUSTER_ADVERTISE_ADDRESS`、`SCRAPER_CLUSTER_JOIN` 可覆盖相应字段，最后一项使用逗号分隔的 `host:port`，不带空格。使用这些环境变量前必须在 YAML 启用 `cluster`；空值或非法值启动时报错，不自动读取 `.env`。IPv6 地址使用 `[IP]:port`。可通过 `SCRAPER_CLUSTER_SECRET_KEY` 设置相同的 base64 编码 AES 密钥（解码后 16、24 或 32 字节），加密并认证 gossip；不设置时只应部署在可信私有网络，并通过网络策略隔离，不要向公网开放 gossip。
+
+**不同实例必须使用相同 job 配置、Event Hub 目标和相同的 exporter Service/DNS 地址，不要分别使用各 exporter Pod 的地址。** scraper 不交换或校验采集配置，配置一致性由部署保证；修改配置不会阻止新旧实例合群，但更新期间可能漏采、重复或使用不同查询参数，应尽快完成整个集群的更新，不能长期混跑不同配置的实例。日志记录节点名、当前成员、就绪状态和任务数，采集及发送日志继续携带 workspace、taskId。实例没有分到任务也正常，仍等待成员变化。
+
+memberlist 内嵌在现有 Go 进程中，不创建协调 Pod/sidecar，不访问 Kubernetes API，不需要 Lease、Redis 或 etcd。**Gossip 是最终一致，不是分布式锁或强一致选主。** 故障检测不是即时的；扩缩容、网络分区、配置更新、重启和任务切换期间允许短暂漏采、重复或窗口重叠，不持久化断点、不补采、不保证 exactly-once。退出时先取消采集和发送，再广播离开并关闭 memberlist。
+
+### 本地多进程
+
+在共享的 [scraper.yaml](scraper.yaml) 中启用 `cluster: {}`，不设置 `join`。第一个 PowerShell 窗口启动种子：
+
+```powershell
+$env:SCRAPER_CLUSTER_BIND_ADDRESS = "127.0.0.1:7946"
+go run .\cmd\metrics-scraper --config.file=.\scraper.yaml --web.listen-address=:8081
+```
+
+第二个窗口使用不同端口并加入第一个进程：
+
+```powershell
+$env:SCRAPER_CLUSTER_BIND_ADDRESS = "127.0.0.1:7947"
+$env:SCRAPER_CLUSTER_JOIN = "127.0.0.1:7946"
+go run .\cmd\metrics-scraper --config.file=.\scraper.yaml --web.listen-address=:8082
+```
+
+若种子退出，其他成员仍继续运行；但新进程和全体重启仍需能解析到可用的种子，生产环境应使用共享发现 DNS 或多个种子，而不是依赖某个固定进程。
+
+### Docker Compose
+
+所有副本挂载同一配置文件，并在其中启用 `cluster: {}`。下面的配置片段从 `scraper` 目录使用；先构建镜像、准备 Event Hub 环境变量，并把共享配置中的 target 改为容器都能访问的 exporter DNS（如 `azure-metrics:8080`）。容器内 `127.0.0.1` 指向自身，不能沿用本地默认地址。
+
+```yaml
+services:
+  scraper:
+    image: azure-metrics-scraper:local
+    command: ["--config.file=/etc/scraper.yaml"]
+    volumes:
+      - ./scraper.yaml:/etc/scraper.yaml:ro
+    environment:
+      AZURE_EVENTHUB_CONNECTION_STRING: ${AZURE_EVENTHUB_CONNECTION_STRING:?Set the Event Hub connection string}
+      SCRAPER_CLUSTER_JOIN: "scraper:7946"
+    expose:
+      - "7946/tcp"
+      - "7946/udp"
+```
+
+可以使用 `docker compose up -d --scale scraper=3` 调整副本数，无需设置 total/index。Compose 的服务 DNS 用于初始发现和定期重试，gossip 使用各容器的实际地址。不要指定固定 `container_name` 或给每个副本映射相同的宿主机端口。exporter 与 scraper 必须连接到同一个或互通的 Docker 网络；这里不需要向宿主机发布 gossip 端口。
 
 ## 平台指标 JSON 采集
 
@@ -81,6 +152,7 @@ PromQL 与平台指标使用相同的 `params.format: ["json"]`，无需增加�
 
 ```yaml
 - job_name: azure-control-plane-window
+  workspaces: ["workspace-a"]
   scrape_interval: 3m
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
@@ -102,6 +174,7 @@ PromQL 与平台指标使用相同的 `params.format: ["json"]`，无需增加�
 
 ```yaml
 - job_name: azure-control-plane
+  workspaces: ["workspace-a"]
   scrape_interval: 1m
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
@@ -133,11 +206,13 @@ PromQL 与平台指标使用相同的 `params.format: ["json"]`，无需增加�
 go run .\cmd\metrics-scraper --config.file=.\scraper.yaml --web.listen-address=:8081
 ```
 
-访问 exporter 不需要 Azure 凭据；查询 Azure 指标的身份仍由 exporter 管理。启用 Event Hub 后，先按下节设置 SAS 连接字符串。`/healthz` 和 `/readyz` 表示进程及配置已就绪，不代表上游抓取成功或 Event Hub 已连通。采集和发送失败需查看日志。Ctrl+C 或 SIGTERM 会取消正在执行的请求和发送并关闭生产者连接。
+访问 exporter 不需要 Azure 凭据；查询 Azure 指标的身份仍由 exporter 管理。启用 Event Hub 后，先按下节设置 SAS 连接字符串。`/healthz` 表示进程存活；配置了种子的集群实例须首次加入成功后 `/readyz` 才返回 200，单机及显式自举实例直接就绪。两者都不代表上游抓取成功、Event Hub 已连通或成员列表全局一致。采集和发送失败需查看日志。Ctrl+C 或 SIGTERM 会取消正在执行的请求和发送，离开集群并关闭生产者连接。
 
 ## Kubernetes 部署
 
-[部署清单](deploy/metrics-scraper.yaml) 包含 ConfigMap 和单副本 Deployment，配置只读挂载到 `/etc/azure-metrics-scraper/scraper.yaml`。`Recreate` 策略用于避免常规滚动更新时两个版本同时采集；不要横向扩容，否则会重复采集。
+[部署清单](deploy/metrics-scraper.yaml) 包含 ConfigMap、双副本 Deployment 和一个 Headless Service，job 使用 `workspace-a`。配置只读挂载到 `/etc/azure-metrics-scraper/scraper.yaml`。Headless Service 的 DNS 返回 Pod IP，`publishNotReadyAddresses: true` 允许尚未就绪的 Pod 自举，避免必须先 ready 才能互相发现的循环依赖。示例使用 IPv4 Pod IP 广播成员地址。
+
+可以直接修改 Deployment 的 replicas，或使用 HPA，无须提前配置 total/index。滚动更新和扩缩容由成员发现触发任务迁移；不承诺切换期间无重复/无丢点。无须 StatefulSet、Kubernetes API 客户端、Lease 或新增 RBAC。
 
 先修改部署清单 ConfigMap 中的 target 为现有 exporter 的 Kubernetes Service 地址（跨 namespace 使用完整 DNS），再使用本目录独立的 [Dockerfile](Dockerfile) 构建并推送镜像。虽然命令在 `scraper` 目录执行，构建上下文仍需指定为上一级仓库根目录，以读取共享的 Go module：
 
@@ -162,7 +237,7 @@ kubectl rollout restart -n <namespace> deployment/azure-metrics-scraper
 kubectl rollout status -n <namespace> deployment/azure-metrics-scraper
 ```
 
-无需 Service 或额外 Azure RBAC；健康探针直接访问 Pod。启用 Event Hub 时，部署前需在同一 namespace 中准备名为 `azure-metrics-eventhub` 的 Kubernetes Secret，键为 `connection-string`，通过现有 Secret 管理工具注入，不要提交到仓库。清单使用 `secretKeyRef` 注入环境变量。集群网络策略需要允许访问 exporter、DNS 及 Event Hubs 的 TLS AMQP 端口 5671。
+健康探针直接访问 Pod，Headless Service 仅用于成员发现，不增加协调进程或 Azure RBAC。启用 Event Hub 时，部署前需在同一 namespace 中准备名为 `azure-metrics-eventhub` 的 Kubernetes Secret，键为 `connection-string`，通过现有 Secret 管理工具注入，不要提交到仓库。清单使用 `secretKeyRef` 注入环境变量。可类似注入所有成员共享的 `SCRAPER_CLUSTER_SECRET_KEY`。网络策略需要允许 scraper Pod 间双向 TCP/UDP 7946，以及访问 exporter、DNS（UDP/TCP 53）及 Event Hubs 的 TLS AMQP 端口 5671。
 
 ## Event Hub SAS 推送
 
@@ -190,6 +265,8 @@ PromQL 消息与示例业务 JSON 使用相同字段结构：
 {
   "schemaVersion": "1.0",
   "source": "aks-controlplane",
+  "workspace": "workspace-a",
+  "taskId": "<stable-task-sha256>",
   "cluster": "sk-rundeck",
   "region": "",
   "windowStart": "2026-10-21T15:00:26Z",
@@ -213,9 +290,9 @@ PromQL 消息与示例业务 JSON 使用相同字段结构：
 - `windowStart` / `windowEnd` 是组内实际源采样时间的最小值 / 最大值；即时查询可能相等，也可能包含不同源时间。`scrapeInterval` 是 job 的抓取周期，不是查询步长；保留亚秒精度。
 - 空结果或无采样点的序列不发送，不补零、不生成伪造窗口，会记录无事件日志（整个结果为空时）。既不累积最近三分钟，也不自动执行示例中的全部 PromQL。
 - 每条事件正文不超过 200 KiB，使用 256 KiB 的 SDK batch 上限预留 AMQP 开销。大组按序列拆分；单条序列过大时按 samples 拆分，每条消息仍是完整有效 JSON，并保留原组窗口元数据。不能拆分的超大单点会在发送前报错。所有消息预先编码和校验，避免编码错误导致部分发送。
-- PromQL 同一 cluster 使用相同 partition key。平台指标使用资源 ID 的小写形式计算 SHA-256 作为 partition key，避免长 ARM ID 超过长度限制。消息的 AMQP Content-Type 为 `application/json`。不保证不同 job 的发送顺序，也不提供消费端确认或 exactly-once。
+- PromQL 消息携带 `workspace` 和稳定 `taskId`，使用 `(workspace, cluster)` 的 SHA-256 作为 partition key，避免不同工作区的同名集群混淆。平台指标不携带 workspace，使用资源 ID 的小写形式计算 SHA-256 作为 partition key，避免长 ARM ID 超过长度限制；也携带任务 taskId。taskId 用于溯源，不是单条事件的去重键。消息的 AMQP Content-Type 为 `application/json`。不保证不同 job 的发送顺序，也不提供消费端确认或 exactly-once。
 - HTTP 抓取继续受 `scrape_timeout` 限制；每批发送另有 30 秒总超时，使用 SDK 默认有界重试。同一 target 同步发送形成背压，不积累无界后台队列；target 的一次采集加发送可能超过抓取周期，但不会重叠。
-- 失败明确记录已确认事件数量；若前几条已成功而后续失败，可能出现部分发送或重试重复。无本地持久化、离线重放或应用层整批重试，下一轮采集新数据，不重发旧批。消费者应按指标名、完整标签及源时间戳进行幂等处理。
+- 失败明确记录已确认事件数量；若前几条已成功而后续失败，可能出现部分发送或重试重复。无本地持久化、离线重放或应用层整批重试，下一轮采集新数据，不重发旧批。需要去重的消费者可按 workspace（如有）、指标名、完整标签及源时间戳进行幂等处理。
 
 ### Azure Monitor 平台指标消息
 

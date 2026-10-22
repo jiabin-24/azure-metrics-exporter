@@ -18,6 +18,7 @@ import (
 const rollingConfig = `
 scrape_configs:
 - job_name: rolling
+  workspaces: [workspace-a]
   metrics_path: /probe/metrics/promql
   rolling_range: {}
   params:

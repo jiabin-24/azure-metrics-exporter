@@ -54,6 +54,7 @@ type Config struct {
 	Global   Timing          `yaml:"global"`
 	Jobs     []Job           `yaml:"scrape_configs"`
 	EventHub *EventHubConfig `yaml:"event_hub"`
+	Cluster  *ClusterConfig  `yaml:"cluster"`
 }
 
 type EventHubConfig struct {
@@ -63,6 +64,7 @@ type EventHubConfig struct {
 
 type Job struct {
 	Name            string              `yaml:"job_name"`
+	Workspaces      []string            `yaml:"workspaces"`
 	Interval        Duration            `yaml:"scrape_interval"`
 	Timeout         Duration            `yaml:"scrape_timeout"`
 	Scheme          string              `yaml:"scheme"`
@@ -91,7 +93,14 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read scrape config: %w", err)
 	}
-	return ParseConfig(data)
+	cfg, err := ParseConfig(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.applyClusterEnvironment(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func ParseConfig(data []byte) (*Config, error) {
@@ -113,6 +122,11 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if len(cfg.Jobs) == 0 {
 		return nil, fmt.Errorf("scrape_configs must contain at least one job")
+	}
+	if cfg.Cluster != nil {
+		if err := cfg.Cluster.validate(); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.EventHub != nil {
 		if !regexp.MustCompile(`^[a-zA-Z0-9-]+\.servicebus\.windows\.net$`).MatchString(cfg.EventHub.Namespace) ||
@@ -147,6 +161,23 @@ func ParseConfig(data []byte) (*Config, error) {
 		}
 		if job.MetricsPath == "" {
 			job.MetricsPath = "/metrics"
+		}
+		if _, exists := job.Params["workspace"]; exists {
+			return nil, fmt.Errorf("job %q: use job.workspaces instead of params.workspace", job.Name)
+		}
+		if job.MetricsPath == config.ProbeMetricsPromQLUrl {
+			if len(job.Workspaces) == 0 {
+				return nil, fmt.Errorf("job %q: PromQL requires a nonempty workspaces list", job.Name)
+			}
+			seen := make(map[string]bool)
+			for _, workspace := range job.Workspaces {
+				if !config.ValidWorkspaceName(workspace) || seen[workspace] {
+					return nil, fmt.Errorf("job %q: invalid or duplicate workspace %q", job.Name, workspace)
+				}
+				seen[workspace] = true
+			}
+		} else if job.Workspaces != nil {
+			return nil, fmt.Errorf("job %q: workspaces is only supported on /probe/metrics/promql", job.Name)
 		}
 		if job.RollingRange != nil {
 			if job.MetricsPath != config.ProbeMetricsPromQLUrl ||

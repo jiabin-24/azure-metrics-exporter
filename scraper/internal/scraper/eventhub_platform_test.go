@@ -25,6 +25,7 @@ event_hub:
   name: metrics
 scrape_configs:
 - job_name: promql
+  workspaces: [workspace-a]
   metrics_path: /probe/metrics/promql
   params:
     format: [json]
@@ -58,6 +59,7 @@ scrape_configs:
 
 func platformTestBatch() Batch {
 	batch := eventTestBatch()
+	batch.Workspace = ""
 	batch.Query = ""
 	batch.MetricsPath = "/probe/metrics/resource"
 	batch.Params = map[string][]string{

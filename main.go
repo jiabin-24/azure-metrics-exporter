@@ -40,8 +40,9 @@ var (
 	prometheusCollectTime    *prometheus.SummaryVec
 	prometheusMetricRequests *prometheus.CounterVec
 
-	metricsCache *cache.Cache
-	azureCache   *cache.Cache
+	metricsCache         *cache.Cache
+	azureCache           *cache.Cache
+	prometheusWorkspaces map[string]string
 
 	//go:embed templates/*.html
 	templates embed.FS
@@ -55,6 +56,14 @@ var (
 func main() {
 	initArgparser()
 	initLogger()
+
+	if path := Opts.Azure.Prometheus.WorkspacesFile; path != "" {
+		var err error
+		prometheusWorkspaces, err = config.LoadWorkspaces(path)
+		if err != nil {
+			logger.Fatal(err.Error())
+		}
+	}
 
 	logger.Info(fmt.Sprintf("starting azure-metrics-exporter v%s (%s; %s; by %v at %v)", gitTag, gitCommit, runtime.Version(), Author, buildDate))
 	logger.Info(string(Opts.GetJson()))

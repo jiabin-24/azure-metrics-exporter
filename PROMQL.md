@@ -19,17 +19,31 @@
 <a id="endpoint-and-auth"></a>
 ## 查询终结点与权限
 
-从 **Azure Monitor 工作区**概述页复制 Prometheus 查询终结点，设置：
+从 **Azure Monitor 工作区**概述页复制 Prometheus 查询终结点，填写 [workspace 配置文件](config/prometheus-workspaces.example.yaml)，并设置文件路径：
 
 ```text
-AZURE_PROMETHEUS_QUERY_ENDPOINT=https://<workspace>.<region>.prometheus.monitor.azure.com
+AZURE_PROMETHEUS_WORKSPACES_FILE=<path-to-workspaces.yaml>
 ```
 
 不要使用 Log Analytics 工作区地址或数据收集终结点（DCE），也不要追加 `/api/v1/query` 或 `/api/v1/query_range`，程序会自动选择路径。
 
 运行导出器所用的 Azure 身份需要在目标 Azure Monitor 工作区上拥有 **Monitoring Data Reader** 角色。导出器会使用现有 Azure 凭据获取 Prometheus API 所需的令牌，无需在 Prometheus job 中配置 Azure 令牌。身份验证方式参见 [README 配置](README.md#configuration)；本地 Azure CLI 登录方式见下方示例。
 
-一个导出器进程使用一个查询终结点。若多个 AKS 集群写入同一工作区，可以通过 PromQL 标签筛选；若要查询不同工作区，应分别部署导出器并设置对应的终结点，job 的 `targets` 指向相应实例。
+单个和多个 workspace 统一使用配置文件；单个 workspace 只需保留一个条目：
+
+```yaml
+workspaces:
+  workspace-a:
+    query_endpoint: https://<workspace-a>.<region>.prometheus.monitor.azure.com
+  workspace-b:
+    query_endpoint: https://<workspace-b>.<region>.prometheus.monitor.azure.com
+```
+
+也可使用 `--azure.prometheus.workspaces-file` 指定路径。启动时严格校验别名、重复键、未知字段和 HTTPS origin；修改后需重启。每个目标 workspace 都需要上述读取权限。每次请求必须指定一个 `workspace` 别名，即使只配置一个 workspace；缺失、空值、重复值或未知别名返回 HTTP 400，合法别名请求但服务尚未配置工作区时返回 HTTP 503。别名以 ASCII 字母或数字开头，总长 1–128 字符，后续可包含字母、数字、`.`、`_`、`-`。
+
+不接受请求直接传 endpoint URL；`workspace` 不转发给 Azure，成功响应携带 `X-Azure-Monitor-Workspace` 标头，不修改 JSON 指标标签。旧的 `AZURE_PROMETHEUS_QUERY_ENDPOINT` / `--azure.prometheus.query-endpoint` 已移除，没有默认 endpoint 回退。多个 AKS 集群写入同一 workspace 时仍可用 PromQL 标签筛选。
+
+exporter 的多个副本应配置相同 workspace 映射和权限，并放在同一个 Service 后。独立 scraper 支持[多 workspace 与 memberlist 分片](scraper/README.md#多-workspace-与-memberlist-分片)，在现有进程内发现成员并自动重新分配任务，不需要 Kubernetes API、Redis 或 etcd 协调。
 
 最小抓取示例（放入 Prometheus 的 `scrape_configs`）：
 
@@ -40,6 +54,7 @@ AZURE_PROMETHEUS_QUERY_ENDPOINT=https://<workspace>.<region>.prometheus.monitor.
   honor_timestamps: true
   metrics_path: /probe/metrics/promql
   params:
+    workspace: ["workspace-a"]
     query: ["apiserver_request_total"]
   static_configs:
   - targets: ["azure-metrics:8080"]
@@ -50,11 +65,12 @@ AZURE_PROMETHEUS_QUERY_ENDPOINT=https://<workspace>.<region>.prometheus.monitor.
 <a id="query-parameters"></a>
 ## 查询参数与结果
 
-也可以在 `/query` Web UI 的 endpoint 下拉框中选择 `/probe/metrics/promql`，填写 `query` 执行即时查询，可用 `time` 指定测试求值时间，或用 `query_delay` 动态延迟求值；范围查询需同时填写 `start`、`end`、`step`，且不能填写 `time` 或 `query_delay`。页面会显示查询响应并生成对应的 Prometheus 抓取配置。固定 `time` 仅用于调试历史结果，不应放入持续监控当前状态的 job。
+也可以在 `/query` Web UI 的 endpoint 下拉框中选择 `/probe/metrics/promql`，填写 `workspace`、`query` 执行即时查询，可用 `time` 指定测试求值时间，或用 `query_delay` 动态延迟求值；范围查询需同时填写 `start`、`end`、`step`，且不能填写 `time` 或 `query_delay`。页面会显示查询响应并生成对应的 Prometheus 抓取配置。固定 `time` 仅用于调试历史结果，不应放入持续监控当前状态的 job。
 
 | GET 参数 | 必填 | 描述 |
 |----------|------|------|
 | `query` | 是 | PromQL 表达式 |
+| `workspace` | 是 | 配置文件中的一个别名，单个 workspace 也必须指定；不接受重复值或 URL |
 | `time` | 否 | 即时查询的固定求值时间，支持 RFC3339 或 Unix 秒；未配置 `time` 和 `query_delay` 时使用本次请求开始查询时的时间。不能与 `query_delay` 或范围查询参数同时使用 |
 | `query_delay` | 否 | 即时查询的动态延迟，每次请求按当前时间减去该时长求值。使用非负 Go duration，如 `20m`、`1h`、`1h30m`、`30s`；`0s` 等同不延迟。不接受空值、重复值、负数、无单位的非零数字或 `1d`。不能与 `time`、`start`、`end`、`step` 同时使用 |
 | `start` | 范围查询必填 | 开始时间，支持 RFC3339 时间或 Unix 时间戳（秒） |
@@ -68,6 +84,7 @@ AZURE_PROMETHEUS_QUERY_ENDPOINT=https://<workspace>.<region>.prometheus.monitor.
 
 ```yaml
 params:
+  workspace: ["workspace-a"]
   query: ["sum(rate(apiserver_request_total[5m]))"]
   start: ["2026-10-19T12:00:00Z"]
   end: ["2026-10-19T13:00:00Z"]
@@ -79,9 +96,10 @@ params:
 <a id="json-window"></a>
 ### 完整时间窗口 JSON
 
-与平台指标接口使用完全相同的配置方式，在 scraper job 的 `params` 中设置：
+在 scraper job 顶层选择 `workspaces`，并在 `params` 中设置 JSON 输出及查询参数：
 
 ```yaml
+workspaces: ["workspace-a"]
 params:
   query: ['sum(rate(apiserver_request_total{cluster="prod"}[5m])) by (cluster, code)']
   start: ["2026-10-21T12:00:00Z"]
@@ -130,6 +148,7 @@ Azure 数据可能尚未入库，导致当前即时查询为空，而历史范�
   honor_timestamps: true
   metrics_path: /probe/metrics/promql
   params:
+    workspace: ["workspace-a"]
     query:
     - 'sum(rate(etcd_network_client_grpc_sent_bytes_total{cluster="sk-rundeck"}[1m]))'
     query_delay: ["20m"]
@@ -283,6 +302,7 @@ kubectl apply -f .\configmap-controlplane.yaml
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
   params:
+    workspace: ["workspace-a"]
     query:
     - '{__name__=~"apiserver_current_inflight_requests|etcd_server_has_leader|scheduler_pending_pods|workqueue_depth|cluster_autoscaler_unschedulable_pods_count"}'
   static_configs:
@@ -298,6 +318,7 @@ kubectl apply -f .\configmap-controlplane.yaml
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
   params:
+    workspace: ["workspace-a"]
     query:
     - 'sum by (cluster, code) (rate(apiserver_request_total[5m]))'
   static_configs:
@@ -313,6 +334,7 @@ kubectl apply -f .\configmap-controlplane.yaml
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
   params:
+    workspace: ["workspace-a"]
     query:
     - 'histogram_quantile(0.99, sum by (cluster, le) (rate(apiserver_request_duration_seconds_bucket{verb!~"WATCH|WATCHLIST|CONNECT"}[5m])))'
   static_configs:
@@ -380,6 +402,7 @@ count by (cluster, __name__) (
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
   params:
+    workspace: ["workspace-a"]
     query:
     - '{__name__=~"etcd_server_has_leader|etcd_server_proposals_pending|etcd_mvcc_db_total_size_in_bytes|etcd_mvcc_db_total_size_in_use_in_bytes|etcd_server_quota_backend_bytes"}'
   static_configs:
@@ -395,6 +418,7 @@ count by (cluster, __name__) (
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
   params:
+    workspace: ["workspace-a"]
     query:
     - 'max by (cluster) (increase(etcd_server_leader_changes_seen_total[15m]))'
   static_configs:
@@ -410,6 +434,7 @@ count by (cluster, __name__) (
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
   params:
+    workspace: ["workspace-a"]
     query:
     - 'max by (cluster) (rate(etcd_server_proposals_failed_total[5m]))'
   static_configs:
@@ -425,6 +450,7 @@ count by (cluster, __name__) (
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
   params:
+    workspace: ["workspace-a"]
     query:
     - 'max by (cluster) (histogram_quantile(0.99, sum by (cluster, instance, le) (rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m]))))'
   static_configs:
@@ -440,6 +466,7 @@ count by (cluster, __name__) (
   scrape_timeout: 30s
   metrics_path: /probe/metrics/promql
   params:
+    workspace: ["workspace-a"]
     query:
     - 'max by (cluster) (histogram_quantile(0.99, sum by (cluster, instance, le) (rate(etcd_disk_backend_commit_duration_seconds_bucket[5m]))))'
   static_configs:
@@ -493,8 +520,8 @@ az account set --subscription "<subscription-id>"
 # 使用本机 Azure CLI 登录凭据
 $env:AZURE_AUTH = "azcli"
 
-# 从 Azure Monitor 工作区概述页复制 Query endpoint，不要使用 DCE
-$env:AZURE_PROMETHEUS_QUERY_ENDPOINT = "https://<workspace>.<region>.prometheus.monitor.azure.com"
+# 先替换配置文件中的占位符；单个 workspace 只保留 workspace-a 条目
+$env:AZURE_PROMETHEUS_WORKSPACES_FILE = (Resolve-Path ".\config\prometheus-workspaces.example.yaml").Path
 
 # 编译到当前目录
 go build -o azure-metrics-exporter.exe .
@@ -521,16 +548,16 @@ go run . --server.bind=127.0.0.1:8080 --server.timeout.write=120s
 Invoke-RestMethod "http://127.0.0.1:8080/healthz"
 
 # PromQL 即时查询，返回 up 指标的时间序列数量
-Invoke-RestMethod "http://127.0.0.1:8080/probe/metrics/promql?query=count%28up%29"
+Invoke-RestMethod "http://127.0.0.1:8080/probe/metrics/promql?workspace=workspace-a&query=count%28up%29"
 
 # 验证当前工作区所有集群的控制平面指标
 $query = [Uri]::EscapeDataString('apiserver_request_total')
-Invoke-RestMethod "http://127.0.0.1:8080/probe/metrics/promql?query=$query"
+Invoke-RestMethod "http://127.0.0.1:8080/probe/metrics/promql?workspace=workspace-a&query=$query"
 
 # 最近 10 分钟的范围查询，步长为 60 秒，每条序列只导出最后一个数据点
 $end = [DateTimeOffset]::UtcNow
 $start = $end.AddMinutes(-10)
-$uri = "http://127.0.0.1:8080/probe/metrics/promql?query=count%28up%29&start=$($start.ToUnixTimeSeconds())&end=$($end.ToUnixTimeSeconds())&step=60"
+$uri = "http://127.0.0.1:8080/probe/metrics/promql?workspace=workspace-a&query=count%28up%29&start=$($start.ToUnixTimeSeconds())&end=$($end.ToUnixTimeSeconds())&step=60"
 Invoke-RestMethod $uri
 ```
 
