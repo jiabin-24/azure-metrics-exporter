@@ -98,7 +98,7 @@ func probeMetricsPromQLHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	if AzureClient == nil {
+	if AzureClient == nil || AzureResourceClient == nil {
 		http.Error(w, "Azure authentication is not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -113,7 +113,7 @@ func probeMetricsPromQLHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutSeconds*float64(time.Second)))
 	defer cancel()
 
-	regions := &promQLRegionEnricher{resources: AzureClient, logger: contextLogger.Logger}
+	regions := &promQLRegionEnricher{resources: AzureResourceClient, logger: contextLogger.Logger}
 	metrics, statusCode, err := collectPromQLMetrics(ctx, endpoint, params, AzureClient.GetCred(), http.DefaultClient, regions)
 	if err != nil {
 		contextLogger.With(slog.Any("error", err)).Warn("Azure Monitor PromQL query failed")

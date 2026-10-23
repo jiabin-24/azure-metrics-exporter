@@ -35,6 +35,7 @@ var (
 	Opts      config.Opts
 
 	AzureClient             *armclient.ArmClient
+	AzureResourceClient     azureResourceGetter
 	AzureResourceTagManager *armclient.ResourceTagManager
 
 	prometheusCollectTime    *prometheus.SummaryVec
@@ -117,6 +118,11 @@ func initAzureConnection() {
 	AzureClient.SetUserAgent(UserAgent + gitTag)
 
 	if err := AzureClient.Connect(); err != nil {
+		logger.Fatal(err.Error())
+	}
+
+	AzureResourceClient, err = newAzureResourceClient(AzureClient.GetCred(), AzureClient.NewArmClientOptions())
+	if err != nil {
 		logger.Fatal(err.Error())
 	}
 
