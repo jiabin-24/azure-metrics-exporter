@@ -103,7 +103,9 @@ func TestTwoMemberlistInstancesCollectAllWorkspacesDisjointly(t *testing.T) {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/probe/metrics/promql/workspaces" {
-			json.NewEncoder(w).Encode(map[string][]string{"workspaces": workspaces})
+			if err := json.NewEncoder(w).Encode(map[string][]string{"workspaces": workspaces}); err != nil {
+				t.Error(err)
+			}
 			return
 		}
 		if len(r.URL.Query()["workspace"]) != 1 {

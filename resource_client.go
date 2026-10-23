@@ -51,7 +51,7 @@ func (c *azureResourceClient) GetCachedResource(ctx context.Context, id string) 
 		return nil, fmt.Errorf("parse Azure resource ID: %w", err)
 	}
 	if resourceID.SubscriptionID == "" || resourceID.ResourceType.Namespace == "" || resourceID.ResourceType.Type == "" {
-		return nil, fmt.Errorf("Azure resource ID must identify a subscription-scoped resource: %q", id)
+		return nil, fmt.Errorf("azure resource ID must identify a subscription-scoped resource: %q", id)
 	}
 	provider, err := c.getProvider(ctx, resourceID.SubscriptionID, resourceID.ResourceType.Namespace)
 	if err != nil {
@@ -126,5 +126,5 @@ func azureResourceAPIVersion(provider *armresources.Provider, resourceType strin
 			return latest, nil
 		}
 	}
-	return "", fmt.Errorf("Azure provider has no API version for resource type %q", resourceType)
+	return "", fmt.Errorf("azure provider has no API version for resource type %q", resourceType)
 }

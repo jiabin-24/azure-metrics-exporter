@@ -163,7 +163,7 @@ func resolvePromQLWorkspace(params url.Values, workspaces map[string]string) (st
 		return "", http.StatusBadRequest, errors.New("workspace requires exactly one valid workspace alias")
 	}
 	if len(workspaces) == 0 {
-		return "", http.StatusServiceUnavailable, errors.New("Azure Monitor Prometheus workspaces are not configured")
+		return "", http.StatusServiceUnavailable, errors.New("no Azure Monitor Prometheus workspaces are configured")
 	}
 	endpoint, ok := workspaces[values[0]]
 	if !ok {

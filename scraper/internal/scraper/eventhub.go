@@ -146,7 +146,7 @@ func eventHubSink(sender eventSender, logger *slog.Logger) Sink {
 		defer cancel()
 		for i, event := range events {
 			if err := sender.Send(ctx, event.body, event.partitionKey); err != nil {
-				return fmt.Errorf("Event Hub delivery failed after %d/%d acknowledged events (delivery may be partial): %w", i, len(events), err)
+				return fmt.Errorf("delivery to Event Hub failed after %d/%d acknowledged events (delivery may be partial): %w", i, len(events), err)
 			}
 		}
 		logger.Info("Event Hub delivery completed", "job", batch.Job, "target", batch.Target, "events", len(events))
@@ -156,7 +156,7 @@ func eventHubSink(sender eventSender, logger *slog.Logger) Sink {
 
 func exportWindows(batch Batch) ([]exportWindow, error) {
 	if batch.Window == nil || batch.Interval <= 0 {
-		return nil, fmt.Errorf("Event Hub export requires a metrics JSON batch with scrape interval")
+		return nil, fmt.Errorf("export to Event Hub requires a metrics JSON batch with scrape interval")
 	}
 	platform := batch.Window.Source == metricdata.Source
 	if !platform && (batch.Window.Source != metricdata.PrometheusSource || batch.Query == "") {

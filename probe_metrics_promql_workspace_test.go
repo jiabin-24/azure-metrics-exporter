@@ -71,7 +71,9 @@ func TestWorkspaceRequestsReachSelectedEndpoint(t *testing.T) {
 					t.Error("local parameters leaked to Azure")
 				}
 				w.Header().Set("Content-Type", "application/json")
-				w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{"cluster":"` + workspace + `"},"value":[1792404000,"1"]}]}}`))
+				if _, err := w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{"cluster":"` + workspace + `"},"value":[1792404000,"1"]}]}}`)); err != nil {
+					t.Error(err)
+				}
 			}))
 			defer server.Close()
 			params := url.Values{"workspace": {workspace}, "query": {"sum(up)"}, "format": {"json"}}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -186,7 +187,7 @@ func TestDeploymentConfig(t *testing.T) {
 		}
 	}
 	var extraDocument interface{}
-	if err := decoder.Decode(&extraDocument); err != io.EOF {
+	if err := decoder.Decode(&extraDocument); !errors.Is(err, io.EOF) {
 		t.Fatalf("expected only a ConfigMap, Deployment and headless Service, got another YAML document or error: %v", err)
 	}
 }

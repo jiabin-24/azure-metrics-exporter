@@ -48,9 +48,10 @@ func TestResolveAllWorkspacesPerTarget(t *testing.T) {
 	for _, expanded := range cfg.Jobs {
 		target := expanded.StaticConfigs[0].Targets[0]
 		var want []string
-		if target == firstTarget {
+		switch target {
+		case firstTarget:
 			want = []string{"a", "b"}
-		} else if target == secondTarget {
+		case secondTarget:
 			want = []string{"c"}
 		}
 		if !reflect.DeepEqual(expanded.workspaces, want) || expanded.StaticConfigs[0].Labels["env"] != "test" {

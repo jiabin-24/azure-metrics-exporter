@@ -79,7 +79,9 @@ func TestPromQLJSONPreservesEveryPointAndSourceTimestamp(t *testing.T) {
 		}
 		sourceQuery := strings.Contains(r.URL.Query().Get("query"), "timestamp(")
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(promQLWindowFixture(t, "requests_total", sourceQuery))
+		if _, err := w.Write(promQLWindowFixture(t, "requests_total", sourceQuery)); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer server.Close()
 	params := url.Values{
@@ -135,7 +137,9 @@ func TestPromQLJSONExpressionUsesEvaluationTime(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
-		w.Write(promQLWindowFixture(t, "", false))
+		if _, err := w.Write(promQLWindowFixture(t, "", false)); err != nil {
+			t.Error(err)
+		}
 	}))
 	defer server.Close()
 	params := url.Values{
