@@ -64,6 +64,7 @@ type EventHubConfig struct {
 
 type Job struct {
 	Name            string              `yaml:"job_name"`
+	MetricName      string              `yaml:"metric_name"`
 	Interval        Duration            `yaml:"scrape_interval"`
 	Timeout         Duration            `yaml:"scrape_timeout"`
 	Scheme          string              `yaml:"scheme"`
@@ -87,6 +88,7 @@ type StaticConfig struct {
 }
 
 var labelName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+var metricName = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
 
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -164,6 +166,16 @@ func ParseConfig(data []byte) (*Config, error) {
 		}
 		if _, exists := job.Params["workspace"]; exists {
 			return nil, fmt.Errorf("job %q: params.workspace is unsupported; all workspaces are discovered automatically", job.Name)
+		}
+		if job.MetricName != "" {
+			if !metricName.MatchString(job.MetricName) {
+				return nil, fmt.Errorf("job %q: invalid metric_name %q", job.Name, job.MetricName)
+			}
+			if job.MetricsPath != config.ProbeMetricsPromQLUrl ||
+				len(job.Params["format"]) != 1 || job.Params["format"][0] != "json" ||
+				len(job.Params["query"]) != 1 || job.Params["query"][0] == "" {
+				return nil, fmt.Errorf("job %q: metric_name requires /probe/metrics/promql, format=json and exactly one query", job.Name)
+			}
 		}
 		if job.RollingRange != nil {
 			if job.MetricsPath != config.ProbeMetricsPromQLUrl ||

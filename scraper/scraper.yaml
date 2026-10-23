@@ -13,23 +13,296 @@ event_hub:
   name: shein-aks-metrics
 
 scrape_configs:
-  - job_name: azure-control-plane
+  - job_name: apiserver_request_rate_by_code
+    metric_name: apiserver_request_rate_by_code
     # Automatically collects every workspace configured in the exporter.
     metrics_path: /probe/metrics/promql
     honor_timestamps: true
-    # 每次抓取查询 [当前时间-delay-window, 当前时间-delay]，不按整分钟取整。
+    # 起止时间按 step 对齐；end 严格早于当前时间-delay，start 为 end-window 向下对齐。
     rolling_range:
       window: 1m
       step: 15s
       delay: 0s
     params:
-      query: ["apiserver_request_total"]
+      query: ['sum(rate(apiserver_request_total[5m])) by (cluster, code)']
       # 返回完整窗口及源采样时间。
       format: ["json"]
       # 即时查询：先移除 rolling_range；query_delay 不能与范围参数同时使用。
       # query_delay: ["20m"]
     static_configs:
-      - targets: ["127.0.0.1:8080"]
+      - targets: &exporter_targets ["127.0.0.1:8080"]
+        labels:
+          environment: development
+
+  - job_name: apiserver_request_rate_by_verb
+    metric_name: apiserver_request_rate_by_verb
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['sum(rate(apiserver_request_total[5m])) by (cluster, verb)']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: apiserver_error_rate_5xx
+    metric_name: apiserver_error_rate_5xx
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['sum(rate(apiserver_request_total{code=~"5.."}[5m])) by (cluster)']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: apiserver_error_ratio_pct
+    metric_name: apiserver_error_ratio_pct
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['100 * sum(rate(apiserver_request_total{code=~"5.."}[5m])) by (cluster) / sum(rate(apiserver_request_total[5m])) by (cluster)']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: apiserver_request_latency_p99
+    metric_name: apiserver_request_latency_p99
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (cluster, le, verb))']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: apiserver_request_latency_p50
+    metric_name: apiserver_request_latency_p50
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['histogram_quantile(0.50, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (cluster, le, verb))']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: apiserver_inflight_requests
+    metric_name: apiserver_inflight_requests
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['sum(apiserver_current_inflight_requests) by (cluster, request_kind)']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: etcd_mvcc_db_total_size_in_bytes
+    metric_name: etcd_mvcc_db_total_size_in_bytes
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['etcd_mvcc_db_total_size_in_bytes']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: etcd_mvcc_db_total_size_in_use_in_bytes
+    metric_name: etcd_mvcc_db_total_size_in_use_in_bytes
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['etcd_mvcc_db_total_size_in_use_in_bytes']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: etcd_db_fragmentation_ratio
+    metric_name: etcd_db_fragmentation_ratio
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['1 - (etcd_mvcc_db_total_size_in_use_in_bytes / etcd_mvcc_db_total_size_in_bytes)']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: etcd_server_has_leader
+    metric_name: etcd_server_has_leader
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['etcd_server_has_leader']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: etcd_heartbeat_send_failures_rate
+    metric_name: etcd_heartbeat_send_failures_rate
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['rate(etcd_server_heartbeat_send_failures_total[5m])']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: etcd_slow_apply_rate
+    metric_name: etcd_slow_apply_rate
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['rate(etcd_server_slow_apply_total[5m])']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: etcd_slow_read_indexes_rate
+    metric_name: etcd_slow_read_indexes_rate
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['rate(etcd_server_slow_read_indexes_total[5m])']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: etcd_grpc_sent_bytes_rate
+    metric_name: etcd_grpc_sent_bytes_rate
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['rate(etcd_network_client_grpc_sent_bytes_total[5m])']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: etcd_server_leader_changes_seen_total
+    metric_name: etcd_server_leader_changes_seen_total
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['etcd_server_leader_changes_seen_total']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: etcd_server_proposals_failed_rate
+    metric_name: etcd_server_proposals_failed_rate
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['rate(etcd_server_proposals_failed_total[5m])']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
+        labels:
+          environment: development
+
+  - job_name: up
+    metric_name: up
+    metrics_path: /probe/metrics/promql
+    honor_timestamps: true
+    rolling_range:
+      window: 1m
+      step: 15s
+      delay: 0s
+    params:
+      query: ['up{job=~"controlplane-.*"}']
+      format: ["json"]
+    static_configs:
+      - targets: *exporter_targets
         labels:
           environment: development
 

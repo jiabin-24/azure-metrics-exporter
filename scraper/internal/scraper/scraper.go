@@ -3,6 +3,7 @@ package scraper
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -222,6 +223,19 @@ func (s *Scraper) Scrape(ctx context.Context, job Job, target string, labels map
 		}
 		if s.Config.EventHub != nil && batch.Window.Source != eventHubSource(job.MetricsPath) {
 			return fmt.Errorf("metrics window source %q does not match endpoint %q", batch.Window.Source, job.MetricsPath)
+		}
+		if job.MetricName != "" {
+			if batch.Window.Source != metricdata.PrometheusSource {
+				return fmt.Errorf("metric_name requires a PromQL metrics window")
+			}
+			for i := range batch.Window.Metrics {
+				batch.Window.Metrics[i].Name = job.MetricName
+			}
+			body, err = json.Marshal(batch.Window)
+			if err != nil {
+				return fmt.Errorf("encode renamed metrics window: %w", err)
+			}
+			batch.Metrics = body
 		}
 		names := make(map[string]bool)
 		samples := 0

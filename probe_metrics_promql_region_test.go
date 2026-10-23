@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +23,201 @@ type promQLResourceGetterFunc func(context.Context, string) (*armresources.Gener
 
 func (f promQLResourceGetterFunc) GetCachedResource(ctx context.Context, id string) (*armresources.GenericResourceExpanded, error) {
 	return f(ctx, id)
+}
+
+type promQLLookupWaitContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *promQLLookupWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
+func waitForPromQLLookup[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case result := <-ch:
+		return result
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for resource lookup")
+		var zero T
+		return zero
+	}
+}
+
+func TestAzureResourceLookupsCoalesce(t *testing.T) {
+	location := "australiaeast"
+	tag := "production"
+	resource := &armresources.GenericResourceExpanded{Location: &location, Tags: map[string]*string{"environment": &tag}}
+	failure := errors.New("resource lookup failed")
+	for _, scenario := range []struct {
+		name     string
+		resource *armresources.GenericResourceExpanded
+		err      error
+	}{
+		{"success", resource, nil},
+		{"not found", nil, nil},
+		{"failure", nil, failure},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var group azureResourceLookupGroup
+			var calls atomic.Int32
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			resources := promQLResourceGetterFunc(func(ctx context.Context, id string) (*armresources.GenericResourceExpanded, error) {
+				calls.Add(1)
+				if id != "/resources/test" {
+					t.Errorf("lookup used a non-normalized resource ID: %q", id)
+				}
+				select {
+				case <-release:
+					return scenario.resource, scenario.err
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			})
+			type result struct {
+				resource *armresources.GenericResourceExpanded
+				err      error
+			}
+			results := make(chan result, 18)
+			for i := range 18 {
+				id := "/resources/test"
+				if i%2 == 0 {
+					id = " /RESOURCES/TEST "
+				}
+				ctx := &promQLLookupWaitContext{Context: t.Context(), waiting: make(chan struct{})}
+				go func() {
+					resource, err := group.get(ctx, resources, id)
+					results <- result{resource, err}
+				}()
+				waitForPromQLLookup(t, ctx.waiting)
+			}
+			unblock()
+			for range 18 {
+				got := waitForPromQLLookup(t, results)
+				if got.resource != scenario.resource || !errors.Is(got.err, scenario.err) {
+					t.Fatalf("waiter did not receive the shared result: %+v", got)
+				}
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("18 concurrent requests made %d underlying calls, want 1", calls.Load())
+			}
+			got, err := group.get(t.Context(), resources, "/resources/test")
+			if got != scenario.resource || !errors.Is(err, scenario.err) || calls.Load() != 2 {
+				t.Fatalf("completed lookups must leave caching/retry to the underlying getter: calls=%d resource=%v err=%v",
+					calls.Load(), got, err)
+			}
+		})
+	}
+}
+
+func TestAzureResourceLookupsDifferentResourcesRunConcurrently(t *testing.T) {
+	var group azureResourceLookupGroup
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	resources := promQLResourceGetterFunc(func(ctx context.Context, id string) (*armresources.GenericResourceExpanded, error) {
+		started <- id
+		select {
+		case <-release:
+			return nil, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	results := make(chan error, 2)
+	for _, id := range []string{"/resources/first", "/resources/second"} {
+		go func() {
+			_, err := group.get(t.Context(), resources, id)
+			results <- err
+		}()
+	}
+	first := waitForPromQLLookup(t, started)
+	second := waitForPromQLLookup(t, started)
+	if first == second {
+		t.Fatal("different resources were incorrectly merged")
+	}
+	unblock()
+	for range 2 {
+		if err := waitForPromQLLookup(t, results); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestAzureResourceLookupCancellationDoesNotCancelOtherWaiters(t *testing.T) {
+	var group azureResourceLookupGroup
+	var calls atomic.Int32
+	started := make(chan context.Context, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	location := "australiaeast"
+	resource := &armresources.GenericResourceExpanded{Location: &location}
+	resources := promQLResourceGetterFunc(func(ctx context.Context, _ string) (*armresources.GenericResourceExpanded, error) {
+		calls.Add(1)
+		started <- ctx
+		select {
+		case <-release:
+			return resource, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	first := make(chan error, 1)
+	go func() {
+		_, err := group.get(ctx, resources, "/resources/test")
+		first <- err
+	}()
+	lookupCtx := waitForPromQLLookup(t, started)
+	if deadline, ok := lookupCtx.Deadline(); !ok || time.Until(deadline) > azureResourceLookupTimeout {
+		t.Fatal("shared resource lookup must retain its own bounded deadline")
+	}
+	waiterCtx := &promQLLookupWaitContext{Context: t.Context(), waiting: make(chan struct{})}
+	second := make(chan error, 1)
+	go func() {
+		got, err := group.get(waiterCtx, resources, "/resources/test")
+		if err == nil && got != resource {
+			err = errors.New("other waiter lost the shared resource result")
+		}
+		second <- err
+	}()
+	waitForPromQLLookup(t, waiterCtx.waiting)
+	cancel()
+	if err := waitForPromQLLookup(t, first); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled waiter did not stop waiting: %v", err)
+	}
+	if err := lookupCtx.Err(); err != nil {
+		t.Fatalf("one waiter cancelled the shared lookup: %v", err)
+	}
+	unblock()
+	if err := waitForPromQLLookup(t, second); err != nil || calls.Load() != 1 {
+		t.Fatalf("other waiter should succeed with one underlying call: calls=%d err=%v", calls.Load(), err)
+	}
+}
+
+func TestAzureResourceLookupAlreadyCancelledDoesNotStart(t *testing.T) {
+	var group azureResourceLookupGroup
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	resources := promQLResourceGetterFunc(func(context.Context, string) (*armresources.GenericResourceExpanded, error) {
+		t.Error("already cancelled request started an underlying lookup")
+		return nil, nil
+	})
+	if _, err := group.get(ctx, resources, "/resources/test"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
 }
 
 func TestPromQLRegionEnrichmentDeduplicatesResourcesAndPreservesLabels(t *testing.T) {
@@ -109,15 +306,26 @@ func TestPromQLRegionEnrichmentFailuresPreserveMetricsAndWarn(t *testing.T) {
 func TestPromQLRegionLookupUsesRequestDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
+	release := make(chan struct{})
+	done := make(chan struct{})
+	defer func() {
+		close(release)
+		<-done
+	}()
 	var logs bytes.Buffer
 	enricher := promQLRegionEnricher{
 		resources: promQLResourceGetterFunc(func(ctx context.Context, _ string) (*armresources.GenericResourceExpanded, error) {
+			defer close(done)
 			deadline, ok := ctx.Deadline()
 			if !ok || time.Until(deadline) > 5*time.Second {
 				t.Error("metadata lookup has no bounded deadline")
 			}
-			<-ctx.Done()
-			return nil, ctx.Err()
+			select {
+			case <-release:
+				return nil, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}),
 		logger: slog.New(slog.NewTextHandler(&logs, nil)),
 	}

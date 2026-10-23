@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/webdevops/azure-metrics-exporter/config"
+	"github.com/webdevops/azure-metrics-exporter/internal/metricdata"
 	"github.com/webdevops/azure-metrics-exporter/metrics"
 )
 
@@ -152,5 +154,111 @@ func TestScrapePromQLWindowUsesSameJSONFormat(t *testing.T) {
 		got.Window.Metrics[0].Labels["microsoft.resourceid"] != "/resources/example" ||
 		string(got.Metrics) != payload {
 		t.Fatalf("PromQL window was not preserved: %+v", got)
+	}
+}
+
+func TestScrapePromQLMetricNameEndToEnd(t *testing.T) {
+	const query = "1 - (etcd_mvcc_db_total_size_in_use_in_bytes / etcd_mvcc_db_total_size_in_bytes)"
+	for _, originalName := range []string{"azure_promql_query_result", "etcd_mvcc_db_total_size_in_bytes"} {
+		t.Run(originalName, func(t *testing.T) {
+			start := time.Date(2026, 10, 15, 12, 24, 15, 0, time.UTC)
+			window := metricdata.Window{
+				SchemaVersion: metricdata.SchemaVersion, Source: metricdata.PrometheusSource,
+				Metrics: []metricdata.Series{},
+			}
+			for _, instance := range []string{"etcd-1", "etcd-2"} {
+				window.Metrics = append(window.Metrics, metricdata.Series{
+					Name: originalName,
+					Labels: map[string]string{
+						"cluster": "aks-ae-cluster-1", "region": "australiaeast", "instance": instance,
+						"microsoft.resourceid": "/resources/example",
+					},
+					Samples: []metricdata.Sample{
+						{Timestamp: start, Value: 0.5891350210970464},
+						{Timestamp: start.Add(15 * time.Second), Value: 0.625},
+					},
+				})
+			}
+			payload, err := json.Marshal(window)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				params := r.URL.Query()
+				if params.Get("query") != query || params.Has("metric_name") ||
+					params.Get("format") != "json" || params.Get("step") != "15s" {
+					t.Errorf("metric alias changed the upstream query: %s", r.URL)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := w.Write(payload); err != nil {
+					t.Errorf("write window: %v", err)
+				}
+			}))
+			defer server.Close()
+			target := strings.TrimPrefix(server.URL, "http://")
+			job := testJob(target)
+			job.MetricName = "etcd_db_fragmentation_ratio"
+			job.Params = map[string][]string{"query": {query}, "format": {"json"}}
+			job.RollingRange = &RollingRange{Window: Duration(time.Minute), Step: Duration(15 * time.Second)}
+			sender := &recordingSender{}
+			sink := eventHubSink(sender, quietLogger())
+			var got Batch
+			s := New(&Config{EventHub: &EventHubConfig{}}, quietLogger(), func(ctx context.Context, batch Batch) error {
+				got = batch
+				return sink(ctx, batch)
+			})
+			defer s.Client.CloseIdleConnections()
+			if err := s.Scrape(context.Background(), job, target, nil); err != nil {
+				t.Fatal(err)
+			}
+			for i := range window.Metrics {
+				window.Metrics[i].Name = job.MetricName
+			}
+			rawWindow, err := metricdata.Decode(got.Metrics)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.Window, &window) || !reflect.DeepEqual(rawWindow, &window) ||
+				got.Families != 1 || got.Query != query {
+				t.Fatalf("metric alias did not preserve samples, labels and query across batch representations: %+v", got)
+			}
+			if len(sender.bodies) != 1 {
+				t.Fatalf("expected one Event Hub event, got %d", len(sender.bodies))
+			}
+			var exported exportWindow
+			if err := json.Unmarshal(sender.bodies[0], &exported); err != nil {
+				t.Fatal(err)
+			}
+			if len(exported.Metrics) != len(window.Metrics) {
+				t.Fatalf("Event Hub event lost series: %+v", exported)
+			}
+			for i, series := range exported.Metrics {
+				want := window.Metrics[i]
+				if series.Name != want.Name || series.PromQL != query ||
+					!reflect.DeepEqual(series.Labels, want.Labels) || !reflect.DeepEqual(series.Samples, want.Samples) {
+					t.Fatalf("Event Hub metric does not match the configured alias and original data: %+v", series)
+				}
+			}
+		})
+	}
+}
+
+func TestScrapeMetricNameRejectsPlatformSource(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"schemaVersion":"1.0","source":"azure-monitor","metrics":[]}`)
+	}))
+	defer server.Close()
+	target := strings.TrimPrefix(server.URL, "http://")
+	job := testJob(target)
+	job.Params = map[string][]string{"query": {"up"}, "format": {"json"}}
+	job.MetricName = "custom_metric"
+	s := New(&Config{}, quietLogger(), func(context.Context, Batch) error {
+		t.Error("invalid source must not reach sink")
+		return nil
+	})
+	defer s.Client.CloseIdleConnections()
+	if err := s.Scrape(context.Background(), job, target, nil); err == nil || !strings.Contains(err.Error(), "metric_name") {
+		t.Fatalf("expected metric_name source error, got %v", err)
 	}
 }

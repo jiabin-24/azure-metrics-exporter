@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -237,6 +238,24 @@ func collectPromQLMetrics(
 		}
 	}
 
+	if allPoints {
+		finite := samples[:0]
+		for _, sample := range samples {
+			if !math.IsNaN(sample.value) && !math.IsInf(sample.value, 0) {
+				finite = append(finite, sample)
+			}
+		}
+		skipped := len(samples) - len(finite)
+		samples = finite
+		if skipped > 0 {
+			log := slog.Default()
+			if regions != nil && regions.logger != nil {
+				log = regions.logger
+			}
+			log.WarnContext(ctx, "skipping non-finite PromQL samples in JSON output",
+				"workspace", params.Get("workspace"), "query", query, "skipped_samples", skipped)
+		}
+	}
 	if regions != nil {
 		regions.enrich(ctx, samples)
 	}

@@ -23,7 +23,13 @@ func TestLocalConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("project contains invalid scrape config: %v", err)
 	}
+	if len(cfg.Jobs) != 18 {
+		t.Fatalf("local config should contain 18 metric jobs, got %d", len(cfg.Jobs))
+	}
 	for _, job := range cfg.Jobs {
+		if job.MetricName != job.Name {
+			t.Fatalf("local job %q should explicitly export its business metric name, got %q", job.Name, job.MetricName)
+		}
 		for _, group := range job.StaticConfigs {
 			for _, target := range group.Targets {
 				if target != "127.0.0.1:8080" {

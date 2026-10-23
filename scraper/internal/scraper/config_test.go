@@ -93,3 +93,47 @@ func TestDefaultGlobalTiming(t *testing.T) {
 		t.Fatalf("incorrect defaults: %+v", cfg.Global)
 	}
 }
+
+func TestConfigMetricName(t *testing.T) {
+	const base = `
+scrape_configs:
+- job_name: fragmentation
+  metric_name: etcd_db_fragmentation_ratio
+  metrics_path: /probe/metrics/promql
+  params:
+    query: ['1 - (etcd_mvcc_db_total_size_in_use_in_bytes / etcd_mvcc_db_total_size_in_bytes)']
+    format: [json]
+  static_configs:
+  - targets: [localhost:8080]
+`
+	for _, name := range []string{"etcd_db_fragmentation_ratio", "custom:metric_total", "_metric"} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := ParseConfig([]byte(strings.Replace(base, "metric_name: etcd_db_fragmentation_ratio", "metric_name: "+name, 1)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Jobs[0].MetricName != name || len(cfg.Jobs[0].Params) != 2 {
+				t.Fatalf("metric_name was lost or forwarded as an HTTP parameter: %+v", cfg.Jobs[0])
+			}
+		})
+	}
+	tests := map[string]string{
+		"invalid name":    strings.Replace(base, "metric_name: etcd_db_fragmentation_ratio", "metric_name: invalid-name", 1),
+		"numeric prefix":  strings.Replace(base, "metric_name: etcd_db_fragmentation_ratio", "metric_name: 1metric", 1),
+		"whitespace":      strings.Replace(base, "metric_name: etcd_db_fragmentation_ratio", "metric_name: ' invalid '", 1),
+		"platform":        strings.Replace(base, "/probe/metrics/promql", "/probe/metrics/resource", 1),
+		"text":            strings.Replace(base, "format: [json]", "format: [prometheus]", 1),
+		"missing format":  strings.Replace(base, "    format: [json]\n", "", 1),
+		"multiple format": strings.Replace(base, "format: [json]", "format: [json, json]", 1),
+		"missing query":   strings.Replace(base, "query: ['1 - (etcd_mvcc_db_total_size_in_use_in_bytes / etcd_mvcc_db_total_size_in_bytes)']", "query: []", 1),
+		"empty query":     strings.Replace(base, "query: ['1 - (etcd_mvcc_db_total_size_in_use_in_bytes / etcd_mvcc_db_total_size_in_bytes)']", "query: ['']", 1),
+		"multiple query":  strings.Replace(base, "query: ['1 - (etcd_mvcc_db_total_size_in_use_in_bytes / etcd_mvcc_db_total_size_in_bytes)']", "query: [up, other]", 1),
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseConfig([]byte(input)); err == nil || !strings.Contains(err.Error(), "metric_name") {
+				t.Fatalf("expected metric_name validation error, got %v", err)
+			}
+		})
+	}
+}

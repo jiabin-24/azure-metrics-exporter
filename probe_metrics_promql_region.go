@@ -5,17 +5,10 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
-	"time"
-
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 )
 
-type promQLResourceGetter interface {
-	GetCachedResource(context.Context, string) (*armresources.GenericResourceExpanded, error)
-}
-
 type promQLRegionEnricher struct {
-	resources promQLResourceGetter
+	resources azureResourceGetter
 	logger    *slog.Logger
 }
 
@@ -47,7 +40,7 @@ func (e *promQLRegionEnricher) enrich(ctx context.Context, samples []promQLSampl
 	}
 	sort.Strings(ids)
 	// Region lookup is optional and must not consume the entire metrics request timeout.
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, azureResourceLookupTimeout)
 	defer cancel()
 	regions := make(map[string]string, len(ids))
 	for _, id := range ids {
@@ -55,7 +48,7 @@ func (e *promQLRegionEnricher) enrich(ctx context.Context, samples []promQLSampl
 			e.logger.Warn("PromQL region lookup cancelled; remaining resource regions are not enriched", "error", err)
 			break
 		}
-		resource, err := e.resources.GetCachedResource(ctx, id)
+		resource, err := azureResourceLookups.get(ctx, e.resources, id)
 		if err != nil {
 			e.logger.Warn("unable to resolve PromQL resource region; preserving metrics without enrichment",
 				"resource_id", id, "error", err)
