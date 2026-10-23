@@ -17,6 +17,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/webdevops/azure-metrics-exporter/internal/metricdata"
+	"github.com/webdevops/azure-metrics-exporter/internal/requestgroup"
 )
 
 type promQLResourceGetterFunc func(context.Context, string) (*armresources.GenericResourceExpanded, error)
@@ -85,33 +86,37 @@ func TestAzureResourceLookupsCoalesce(t *testing.T) {
 				resource *armresources.GenericResourceExpanded
 				err      error
 			}
-			results := make(chan result, 18)
-			for i := range 18 {
+			results := make(chan result, 1)
+			ctx := &promQLLookupWaitContext{Context: t.Context(), waiting: make(chan struct{})}
+			go func() {
+				resource, err := group.get(ctx, resources, "/resources/test")
+				results <- result{resource, err}
+			}()
+			waitForPromQLLookup(t, ctx.waiting)
+			for i := range 17 {
 				id := "/resources/test"
 				if i%2 == 0 {
 					id = " /RESOURCES/TEST "
 				}
-				ctx := &promQLLookupWaitContext{Context: t.Context(), waiting: make(chan struct{})}
-				go func() {
-					resource, err := group.get(ctx, resources, id)
-					results <- result{resource, err}
-				}()
-				waitForPromQLLookup(t, ctx.waiting)
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				resource, err := group.get(ctx, resources, id)
+				cancel()
+				if resource != nil || !errors.Is(err, requestgroup.ErrInFlight) {
+					t.Fatalf("in-flight resource lookup must be skipped without waiting: resource=%v err=%v", resource, err)
+				}
 			}
 			unblock()
-			for range 18 {
-				got := waitForPromQLLookup(t, results)
-				if got.resource != scenario.resource || !errors.Is(got.err, scenario.err) {
-					t.Fatalf("waiter did not receive the shared result: %+v", got)
-				}
+			got := waitForPromQLLookup(t, results)
+			if got.resource != scenario.resource || !errors.Is(got.err, scenario.err) {
+				t.Fatalf("initiating caller did not receive the resource result: %+v", got)
 			}
 			if calls.Load() != 1 {
 				t.Fatalf("18 concurrent requests made %d underlying calls, want 1", calls.Load())
 			}
-			got, err := group.get(t.Context(), resources, "/resources/test")
-			if got != scenario.resource || !errors.Is(err, scenario.err) || calls.Load() != 2 {
+			resource, err := group.get(t.Context(), resources, "/resources/test")
+			if resource != scenario.resource || !errors.Is(err, scenario.err) || calls.Load() != 2 {
 				t.Fatalf("completed lookups must leave caching/retry to the underlying getter: calls=%d resource=%v err=%v",
-					calls.Load(), got, err)
+					calls.Load(), resource, err)
 			}
 		})
 	}
@@ -153,7 +158,7 @@ func TestAzureResourceLookupsDifferentResourcesRunConcurrently(t *testing.T) {
 	}
 }
 
-func TestAzureResourceLookupCancellationDoesNotCancelOtherWaiters(t *testing.T) {
+func TestAzureResourceLookupCancellationKeepsSharedRequestRunning(t *testing.T) {
 	var group azureResourceLookupGroup
 	var calls atomic.Int32
 	started := make(chan context.Context, 1)
@@ -187,7 +192,10 @@ func TestAzureResourceLookupCancellationDoesNotCancelOtherWaiters(t *testing.T) 
 	waiterCtx := &promQLLookupWaitContext{Context: t.Context(), waiting: make(chan struct{})}
 	second := make(chan error, 1)
 	go func() {
-		got, err := group.get(waiterCtx, resources, "/resources/test")
+		got, err := group.requests.Do(waiterCtx, "/resources/test", azureResourceLookupTimeout,
+			func(context.Context) (*armresources.GenericResourceExpanded, error) {
+				return nil, errors.New("completion observer started a duplicate query")
+			})
 		if err == nil && got != resource {
 			err = errors.New("other waiter lost the shared resource result")
 		}
@@ -317,7 +325,7 @@ func TestPromQLRegionLookupUsesRequestDeadline(t *testing.T) {
 		resources: promQLResourceGetterFunc(func(ctx context.Context, _ string) (*armresources.GenericResourceExpanded, error) {
 			defer close(done)
 			deadline, ok := ctx.Deadline()
-			if !ok || time.Until(deadline) > 5*time.Second {
+			if !ok || time.Until(deadline) > azureResourceLookupTimeout {
 				t.Error("metadata lookup has no bounded deadline")
 			}
 			select {

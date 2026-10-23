@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +21,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/patrickmn/go-cache"
 	"github.com/webdevops/go-common/azuresdk/armclient"
+
+	"github.com/webdevops/azure-metrics-exporter/internal/requestgroup"
 )
 
 const testAzureResourceID = "/subscriptions/sub/resourcegroups/rg/providers/microsoft.containerservice/managedclusters/aks"
@@ -82,33 +86,31 @@ func TestAzureResourceClientDirectLookupCacheAndCoalescing(t *testing.T) {
 		resource *armresources.GenericResourceExpanded
 		err      error
 	}
-	results := make(chan result, 18)
-	for i := range 18 {
+	results := make(chan result, 1)
+	ctx := &promQLLookupWaitContext{Context: t.Context(), waiting: make(chan struct{})}
+	go func() {
+		resource, err := lookups.get(ctx, client, testAzureResourceID)
+		results <- result{resource, err}
+	}()
+	waitForPromQLLookup(t, ctx.waiting)
+	for i := range 17 {
 		id := testAzureResourceID
 		if i%2 == 0 {
 			id = strings.ToUpper(id)
 		}
-		ctx := &promQLLookupWaitContext{Context: t.Context(), waiting: make(chan struct{})}
-		go func() {
-			resource, err := lookups.get(ctx, client, id)
-			results <- result{resource, err}
-		}()
-		waitForPromQLLookup(t, ctx.waiting)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		resource, err := lookups.get(ctx, client, id)
+		cancel()
+		if resource != nil || !errors.Is(err, requestgroup.ErrInFlight) {
+			t.Fatalf("later resource requests must skip an in-flight lookup: resource=%v err=%v", resource, err)
+		}
 	}
 	unblock()
-	var first *armresources.GenericResourceExpanded
-	for range 18 {
-		got := waitForPromQLLookup(t, results)
-		if got.err != nil || got.resource == nil {
-			t.Fatalf("direct lookup failed: %v", got.err)
-		}
-		if first == nil {
-			first = got.resource
-		}
-		if got.resource != first {
-			t.Fatal("concurrent requests did not share the same resource result")
-		}
+	got := waitForPromQLLookup(t, results)
+	if got.err != nil || got.resource == nil {
+		t.Fatalf("direct lookup failed: %v", got.err)
 	}
+	first := got.resource
 	properties, ok := first.Properties.(map[string]any)
 	if first.Location == nil || *first.Location != "australiaeast" ||
 		first.Tags["environment"] == nil || *first.Tags["environment"] != "production" ||
@@ -129,6 +131,97 @@ func TestAzureResourceClientDirectLookupCacheAndCoalescing(t *testing.T) {
 		providerCalls.Load() != 1 || resourceCalls.Load() != 2 {
 		t.Fatalf("expired resource should refresh without repeating provider discovery: provider=%d resource=%d err=%v",
 			providerCalls.Load(), resourceCalls.Load(), err)
+	}
+}
+
+func TestAzureResourceClientWarmsCacheAfterEnrichmentWaitTimeout(t *testing.T) {
+	if azureResourceWaitTimeout != 5*time.Second || azureResourceLookupTimeout != 30*time.Second {
+		t.Fatal("enrichment wait and shared lookup limits must be 5s and 30s respectively")
+	}
+	var providerCalls, resourceCalls atomic.Int32
+	started := make(chan struct{}, 1)
+	cancelled := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	client := testAzureResourceClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case testAzureProviderPath:
+			providerCalls.Add(1)
+			fmt.Fprint(w, testAzureProvider)
+		case testAzureResourceID:
+			resourceCalls.Add(1)
+			started <- struct{}{}
+			select {
+			case <-release:
+				fmt.Fprint(w, testAzureResource)
+			case <-r.Context().Done():
+				cancelled <- struct{}{}
+			}
+		default:
+			t.Errorf("unexpected request: %s", r.URL)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+		}
+	})
+	var logs bytes.Buffer
+	enricher := promQLRegionEnricher{
+		resources: client, logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	samples := []promQLSample{{labels: map[string]string{"resourceID": testAzureResourceID}, value: 7, timestampMillis: 123}}
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		defer close(done)
+		enricher.enrich(t.Context(), samples)
+	}()
+	waitForPromQLLookup(t, started)
+	select {
+	case <-done:
+	case <-time.After(azureResourceWaitTimeout + 2*time.Second):
+		t.Fatal("enrichment kept waiting for the 30-second background request")
+	}
+	if elapsed := time.Since(start); elapsed < azureResourceWaitTimeout || elapsed > azureResourceWaitTimeout+2*time.Second {
+		t.Fatalf("enrichment did not stop at the 5-second wait limit: %v", elapsed)
+	}
+	if samples[0].labels["region"] != "" || samples[0].value != 7 || samples[0].timestampMillis != 123 ||
+		!strings.Contains(logs.String(), "deadline exceeded") {
+		t.Fatalf("first scrape must preserve metrics and warn without a region: samples=%+v logs=%s", samples, logs.String())
+	}
+	select {
+	case <-cancelled:
+		t.Fatal("enrichment timeout cancelled the shared background resource request")
+	default:
+	}
+	beforeSkip := time.Now()
+	skipped := []promQLSample{{labels: map[string]string{"resourceID": testAzureResourceID}, value: 9, timestampMillis: 456}}
+	enricher.enrich(t.Context(), skipped)
+	if time.Since(beforeSkip) >= time.Second || skipped[0].labels["region"] != "" ||
+		skipped[0].value != 9 || skipped[0].timestampMillis != 456 ||
+		strings.Count(logs.String(), "level=WARN") != 1 ||
+		!strings.Contains(logs.String(), "lookup already in flight; skipping region enrichment") {
+		t.Fatalf("later scrape must skip immediately without changing samples or adding WARN: samples=%+v logs=%s",
+			skipped, logs.String())
+	}
+	unblock()
+	if _, err := azureResourceLookups.requests.Do(t.Context(), testAzureResourceID, azureResourceLookupTimeout,
+		func(ctx context.Context) (*armresources.GenericResourceExpanded, error) {
+			return client.GetCachedResource(ctx, testAzureResourceID)
+		}); err != nil {
+		t.Fatalf("background request failed after the first scrape stopped waiting: %v", err)
+	}
+	next := []promQLSample{{labels: map[string]string{"resourceID": testAzureResourceID}}}
+	enricher.enrich(t.Context(), next)
+	if next[0].labels["region"] != "australiaeast" {
+		t.Fatalf("later scrape did not receive the background resource result: %+v", next)
+	}
+	before := time.Now()
+	cached := []promQLSample{{labels: map[string]string{"resourceID": testAzureResourceID}}}
+	enricher.enrich(t.Context(), cached)
+	if cached[0].labels["region"] != "australiaeast" || time.Since(before) >= time.Second ||
+		providerCalls.Load() != 1 || resourceCalls.Load() != 1 {
+		t.Fatalf("cache was not populated after the initial wait timed out: samples=%+v provider=%d resource=%d",
+			cached, providerCalls.Load(), resourceCalls.Load())
 	}
 }
 

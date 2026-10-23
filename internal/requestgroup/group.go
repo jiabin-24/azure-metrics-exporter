@@ -3,10 +3,14 @@ package requestgroup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 )
+
+// ErrInFlight indicates that another request is already running for the same key.
+var ErrInFlight = errors.New("request already in flight")
 
 // Group shares one in-flight request per key. Its zero value is ready to use.
 // A Group must not be copied after first use.
@@ -27,6 +31,16 @@ type call[T any] struct {
 // Callers must include the operation and scope in the key when requests differ,
 // and must not mutate a shared result without synchronization.
 func (g *Group[T]) Do(ctx context.Context, key string, timeout time.Duration, fn func(context.Context) (T, error)) (T, error) {
+	return g.do(ctx, key, timeout, fn, true)
+}
+
+// TryDo behaves like Do, but returns ErrInFlight immediately if the key is busy.
+// The caller starting a new request still waits for its result or cancellation.
+func (g *Group[T]) TryDo(ctx context.Context, key string, timeout time.Duration, fn func(context.Context) (T, error)) (T, error) {
+	return g.do(ctx, key, timeout, fn, false)
+}
+
+func (g *Group[T]) do(ctx context.Context, key string, timeout time.Duration, fn func(context.Context) (T, error), wait bool) (T, error) {
 	var zero T
 	if err := ctx.Err(); err != nil {
 		return zero, err
@@ -39,6 +53,10 @@ func (g *Group[T]) Do(ctx context.Context, key string, timeout time.Duration, fn
 		g.pending = make(map[string]*call[T])
 	}
 	request := g.pending[key]
+	if request != nil && !wait {
+		g.mu.Unlock()
+		return zero, ErrInFlight
+	}
 	if request == nil {
 		request = &call[T]{done: make(chan struct{})}
 		g.pending[key] = request

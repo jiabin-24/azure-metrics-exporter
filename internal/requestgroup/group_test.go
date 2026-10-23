@@ -98,6 +98,85 @@ func TestDoSharedTimeoutDoesNotCacheFailure(t *testing.T) {
 	}
 }
 
+func TestTryDoSkipsInFlightRequestsAndAllowsRetry(t *testing.T) {
+	for _, starter := range []string{"Do", "TryDo"} {
+		t.Run(starter, func(t *testing.T) {
+			var group Group[int]
+			started := make(chan struct{}, 1)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			type result struct {
+				value int
+				err   error
+			}
+			results := make(chan result, 1)
+			do := group.Do
+			if starter == "TryDo" {
+				do = group.TryDo
+			}
+			go func() {
+				value, err := do(t.Context(), "resource", time.Second, func(ctx context.Context) (int, error) {
+					started <- struct{}{}
+					select {
+					case <-release:
+						return 42, nil
+					case <-ctx.Done():
+						return 0, ctx.Err()
+					}
+				})
+				results <- result{value, err}
+			}()
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("initial request did not start")
+			}
+			for range 17 {
+				ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+				value, err := group.TryDo(ctx, "resource", time.Second, func(context.Context) (int, error) {
+					t.Error("skipped request executed its callback")
+					return 99, nil
+				})
+				cancel()
+				if value != 0 || !errors.Is(err, ErrInFlight) {
+					t.Fatalf("busy key must return ErrInFlight without waiting: value=%d err=%v", value, err)
+				}
+			}
+			unblock()
+			got := <-results
+			if got.value != 42 || got.err != nil {
+				t.Fatalf("skipped requests affected the original request: %+v", got)
+			}
+			value, err := group.TryDo(t.Context(), "resource", time.Second, func(context.Context) (int, error) {
+				return 99, nil
+			})
+			if value != 99 || err != nil {
+				t.Fatalf("completed key was not released for a new request: value=%d err=%v", value, err)
+			}
+		})
+	}
+}
+
+func TestTryDoValidatesTimeoutAndCancellation(t *testing.T) {
+	var group Group[int]
+	fn := func(context.Context) (int, error) {
+		t.Error("invalid or cancelled request executed its callback")
+		return 42, nil
+	}
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		if _, err := group.TryDo(t.Context(), "resource", timeout, fn); err == nil {
+			t.Fatal("non-positive timeout must fail")
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := group.TryDo(ctx, "resource", time.Second, fn); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled request must not start: %v", err)
+	}
+}
+
 func TestDoRejectsNonPositiveTimeout(t *testing.T) {
 	var group Group[int]
 	for _, timeout := range []time.Duration{0, -time.Second} {

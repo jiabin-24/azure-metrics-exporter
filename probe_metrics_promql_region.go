@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sort"
 	"strings"
+
+	"github.com/webdevops/azure-metrics-exporter/internal/requestgroup"
 )
 
 type promQLRegionEnricher struct {
@@ -40,7 +43,7 @@ func (e *promQLRegionEnricher) enrich(ctx context.Context, samples []promQLSampl
 	}
 	sort.Strings(ids)
 	// Region lookup is optional and must not consume the entire metrics request timeout.
-	ctx, cancel := context.WithTimeout(ctx, azureResourceLookupTimeout)
+	ctx, cancel := context.WithTimeout(ctx, azureResourceWaitTimeout)
 	defer cancel()
 	regions := make(map[string]string, len(ids))
 	for _, id := range ids {
@@ -49,6 +52,10 @@ func (e *promQLRegionEnricher) enrich(ctx context.Context, samples []promQLSampl
 			break
 		}
 		resource, err := azureResourceLookups.get(ctx, e.resources, id)
+		if errors.Is(err, requestgroup.ErrInFlight) {
+			e.logger.Debug("PromQL resource lookup already in flight; skipping region enrichment", "resource_id", id)
+			continue
+		}
 		if err != nil {
 			e.logger.Warn("unable to resolve PromQL resource region; preserving metrics without enrichment",
 				"resource_id", id, "error", err)
