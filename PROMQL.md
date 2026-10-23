@@ -27,7 +27,7 @@ AZURE_PROMETHEUS_WORKSPACES_FILE=<path-to-workspaces.yaml>
 
 不要使用 Log Analytics 工作区地址或数据收集终结点（DCE），也不要追加 `/api/v1/query` 或 `/api/v1/query_range`，程序会自动选择路径。
 
-运行导出器所用的 Azure 身份需要在目标 Azure Monitor 工作区上拥有 **Monitoring Data Reader** 角色。导出器会使用现有 Azure 凭据获取 Prometheus API 所需的令牌，无需在 Prometheus job 中配置 Azure 令牌。身份验证方式参见 [README 配置](README.md#configuration)；本地 Azure CLI 登录方式见下方示例。
+运行导出器所用的 Azure 身份需要在目标 Azure Monitor 工作区上拥有 **Monitoring Data Reader** 角色。导出器会使用现有 Azure 凭据获取 Prometheus API 所需的令牌，无需在 Prometheus job 中配置 Azure 令牌。身份验证方式参见[配置说明](GUIDE.md#configuration)；本地 Azure CLI 登录方式见下方示例。
 
 单个和多个 workspace 统一使用配置文件；单个 workspace 只需保留一个条目：
 
@@ -181,7 +181,7 @@ Azure 数据可能尚未入库，导致当前即时查询为空，而历史范�
 - 带括号、`offset`、`@` 等表达式不自动追溯原始采样时间；范围查询仍只输出最后一点。
 - 两次请求使用相同求值时间，但不是事务快照。获取时间失败或匹配失败会报错，不回退到本地时间。
 - 不提供历史补采；旧样本可能不再显示，乱序或同时间不同值可能被拒绝。
-- Azure 平台指标也保留源时间，缓存不刷新时间，见 [平台指标源时间戳](README.md#源时间戳)；`/metrics` 自身指标不变。
+- Azure 平台指标也保留源时间，缓存不刷新时间，见 [平台指标源时间戳](GUIDE.md#源时间戳)；`/metrics` 自身指标不变。
 
 查询结果中的 `__name__` 会作为导出的指标名称；如果结果没有指标名（例如聚合表达式），则使用 `azure_promql_query_result`。端点支持数值型即时向量、标量和范围矩阵结果，不支持字符串或原生直方图结果；所有结果以 gauge 导出。
 
