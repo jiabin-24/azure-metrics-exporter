@@ -91,7 +91,7 @@ PromQL job 固定采集 exporter 配置的**全部 workspace**，无需也不允
 
 ### PromQL 滚动查询范围
 
-`rolling_range` 每次生成 `[当前时间 - delay - window, 当前时间 - delay]` 的查询范围，默认 `window: 1m`、`step: 15s`、`delay: 0s`。
+`rolling_range` 的 `end` 取严格早于 `当前时间 - delay` 的最近 `step` 整点，`start` 取 `end - window` 向下对齐后的整点，必要时略微扩大窗口。起止时间和采样时间均对齐 `step`。默认 `window: 1m`、`step: 15s`、`delay: 0s`。
 
 有入库延迟时调整 `delay`，例如 `20m`。不能同时配置 `params.start/end/step/time/query_delay`。即时查询需移除 `rolling_range`。更多查询参数见 [PromQL 文档](../PROMQL.md)。
 

@@ -39,17 +39,17 @@ func TestRollingRangeDefaultsAndExactBounds(t *testing.T) {
 	}
 	now := time.Date(2026, 10, 22, 0, 0, 24, 123456789, time.FixedZone("UTC+8", 8*60*60))
 	params := job.paramsAt(now)
-	if params["start"][0] != "2026-10-21T15:59:24.123Z" ||
-		params["end"][0] != "2026-10-21T16:00:24.123Z" || params["step"][0] != "15s" ||
+	if params["start"][0] != "2026-10-21T15:59:15Z" ||
+		params["end"][0] != "2026-10-21T16:00:15Z" || params["step"][0] != "15s" ||
 		params["query"][0] != job.Params["query"][0] || params["format"][0] != "json" {
 		t.Fatalf("incorrect dynamic range or other parameters: %v", params)
 	}
 	next := job.paramsAt(now.Add(time.Minute))
-	if next["start"][0] != params["end"][0] || next["end"][0] != "2026-10-21T16:01:24.123Z" {
+	if next["start"][0] != params["end"][0] || next["end"][0] != "2026-10-21T16:01:15Z" {
 		t.Fatalf("range did not move by one minute: %v -> %v", params, next)
 	}
 	if _, exists := job.Params["start"]; exists || len(job.Params) != 2 ||
-		params["start"][0] != "2026-10-21T15:59:24.123Z" {
+		params["start"][0] != "2026-10-21T15:59:15Z" {
 		t.Fatal("evaluating another scrape mutated config or a previous batch")
 	}
 }
@@ -63,8 +63,8 @@ func TestRollingRangeCustomWindowDelayAndStep(t *testing.T) {
 	job := cfg.Jobs[0]
 	now := time.Date(2026, 10, 22, 0, 10, 24, 0, time.UTC)
 	params := job.paramsAt(now)
-	if params["start"][0] != "2026-10-21T23:47:24Z" ||
-		params["end"][0] != "2026-10-21T23:50:24Z" || params["step"][0] != "30s" {
+	if params["start"][0] != "2026-10-21T23:47:00Z" ||
+		params["end"][0] != "2026-10-21T23:50:00Z" || params["step"][0] != "30s" {
 		t.Fatalf("delay or custom range was not applied: %v", params)
 	}
 	copy := job
@@ -72,6 +72,82 @@ func TestRollingRangeCustomWindowDelayAndStep(t *testing.T) {
 	u, err := url.Parse(copy.targetURL("localhost:8080"))
 	if err != nil || !reflect.DeepEqual(map[string][]string(u.Query()), params) {
 		t.Fatalf("dynamic parameters did not survive URL encoding: %v, %v", u, err)
+	}
+}
+
+func TestPreviousStep(t *testing.T) {
+	tests := []struct {
+		name string
+		now  time.Time
+		step time.Duration
+		want time.Time
+	}{
+		{"fractional second", time.Unix(24, 123456789), 15 * time.Second, time.Unix(15, 0)},
+		{"exact boundary", time.Unix(30, 0), 15 * time.Second, time.Unix(15, 0)},
+		{"just after boundary", time.Unix(30, 1), 15 * time.Second, time.Unix(30, 0)},
+		{"just before boundary", time.Unix(30, -1), 15 * time.Second, time.Unix(15, 0)},
+		{"epoch alignment", time.Unix(100, 0), 7 * time.Second, time.Unix(98, 0)},
+		{"milliseconds", time.Unix(0, 17500000), 5 * time.Millisecond, time.Unix(0, 15000000)},
+		{"exact millisecond", time.Unix(0, 15000000), 5 * time.Millisecond, time.Unix(0, 10000000)},
+		{"before epoch", time.Unix(-1, 123456789), 15 * time.Second, time.Unix(-15, 0)},
+		{"epoch boundary", time.Unix(0, 0), 15 * time.Second, time.Unix(-15, 0)},
+		{"timezone", time.Unix(24, 0).In(time.FixedZone("UTC+8", 8*60*60)), 15 * time.Second, time.Unix(15, 0)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := previousStep(tt.now, tt.step)
+			if !got.Equal(tt.want) || got.Location() != time.UTC {
+				t.Fatalf("previousStep(%v, %v) = %v, want %v in UTC", tt.now, tt.step, got, tt.want)
+			}
+			if !got.Before(tt.now) || got.Add(tt.step).Before(tt.now) ||
+				got.UnixMilli()%tt.step.Milliseconds() != 0 || got.Nanosecond()%int(time.Millisecond) != 0 {
+				t.Fatalf("result is not the closest aligned step strictly before now: %v", got)
+			}
+		})
+	}
+}
+
+func TestRollingRangeAlignedBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		window time.Duration
+		step   time.Duration
+		delay  time.Duration
+		now    time.Time
+		start  time.Time
+		end    time.Time
+	}{
+		{"exact boundary", time.Minute, 15 * time.Second, 0, time.Unix(90, 0), time.Unix(15, 0), time.Unix(75, 0)},
+		{"expanded window", 61 * time.Second, 15 * time.Second, 0, time.Unix(91, 0), time.Unix(15, 0), time.Unix(90, 0)},
+		{"delay before alignment", time.Minute, 15 * time.Second, 7 * time.Second, time.Unix(96, 0), time.Unix(15, 0), time.Unix(75, 0)},
+		{"delayed boundary", time.Minute, 15 * time.Second, 7 * time.Second, time.Unix(97, 0), time.Unix(15, 0), time.Unix(75, 0)},
+		{"millisecond window", 11 * time.Millisecond, 5 * time.Millisecond, time.Millisecond, time.Unix(0, 22500000), time.Unix(0, 5000000), time.Unix(0, 20000000)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := Job{
+				Params: map[string][]string{"query": {"up"}},
+				RollingRange: &RollingRange{
+					Window: Duration(tt.window), Step: Duration(tt.step), Delay: NonNegativeDuration(tt.delay),
+				},
+			}
+			params := job.paramsAt(tt.now)
+			start, startErr := time.Parse(time.RFC3339Nano, params["start"][0])
+			end, endErr := time.Parse(time.RFC3339Nano, params["end"][0])
+			if startErr != nil || endErr != nil || !start.Equal(tt.start) || !end.Equal(tt.end) {
+				t.Fatalf("incorrect aligned range: %v (parse errors: %v, %v)", params, startErr, endErr)
+			}
+			if start.UnixMilli()%tt.step.Milliseconds() != 0 || end.UnixMilli()%tt.step.Milliseconds() != 0 ||
+				end.Sub(start) < tt.window || end.Sub(start)-tt.window >= tt.step ||
+				!end.Before(tt.now.Add(-tt.delay)) {
+				t.Fatalf("range does not satisfy step alignment and window bounds: %v", params)
+			}
+			for point := start; !point.After(end); point = point.Add(tt.step) {
+				if point.UnixMilli()%tt.step.Milliseconds() != 0 {
+					t.Fatalf("unaligned output timestamp: %v", point)
+				}
+			}
+		})
 	}
 }
 
@@ -144,6 +220,7 @@ func TestRollingScheduledScrapesReachEventHubAfterFailure(t *testing.T) {
 		start, startErr := time.Parse(time.RFC3339Nano, query.Get("start"))
 		end, endErr := time.Parse(time.RFC3339Nano, query.Get("end"))
 		if startErr != nil || endErr != nil || end.Sub(start) != time.Minute ||
+			start.UnixNano()%int64(15*time.Second) != 0 || end.UnixNano()%int64(15*time.Second) != 0 ||
 			query.Get("step") != "15s" || query.Has("query_delay") || query.Has("rolling_range") {
 			t.Errorf("incorrect scheduled request: %s", r.URL)
 			http.Error(w, "bad range", http.StatusBadRequest)
@@ -215,8 +292,8 @@ func TestRollingScheduledScrapesReachEventHubAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !secondEnd.After(firstEnd) {
-		t.Fatalf("range was reused across scheduled scrapes: %v / %v", got[0].Params, got[1].Params)
+	if secondEnd.Before(firstEnd) {
+		t.Fatalf("range moved backwards across scheduled scrapes: %v / %v", got[0].Params, got[1].Params)
 	}
 	if _, exists := cfg.Jobs[0].Params["start"]; exists {
 		t.Fatal("scheduled queries mutated shared configuration")

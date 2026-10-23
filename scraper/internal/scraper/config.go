@@ -249,16 +249,35 @@ func (j Job) targetURL(target string) string {
 	return u.String()
 }
 
+// previousStep returns the last Unix-epoch-aligned step strictly before now.
+// step must be positive and use whole milliseconds, as validated by ParseConfig.
+func previousStep(now time.Time, step time.Duration) time.Time {
+	remainder := time.Duration(now.UnixMilli()%step.Milliseconds())*time.Millisecond +
+		time.Duration(now.Nanosecond()%int(time.Millisecond))
+	if remainder < 0 {
+		remainder += step
+	}
+	if remainder == 0 {
+		remainder = step
+	}
+	return now.UTC().Add(-remainder)
+}
+
 func (j Job) paramsAt(now time.Time) map[string][]string {
 	if j.RollingRange == nil {
 		return j.Params
 	}
 	params := maps.Clone(j.Params)
-	end := now.UTC().Add(-time.Duration(j.RollingRange.Delay)).Truncate(time.Millisecond)
-	start := end.Add(-time.Duration(j.RollingRange.Window))
+	step := time.Duration(j.RollingRange.Step)
+	window := time.Duration(j.RollingRange.Window)
+	end := previousStep(now.Add(-time.Duration(j.RollingRange.Delay)), step)
+	start := end.Add(-window)
+	if remainder := window % step; remainder != 0 {
+		start = start.Add(remainder - step)
+	}
 	params["start"] = []string{start.Format(time.RFC3339Nano)}
 	params["end"] = []string{end.Format(time.RFC3339Nano)}
-	params["step"] = []string{time.Duration(j.RollingRange.Step).String()}
+	params["step"] = []string{step.String()}
 	return params
 }
 
