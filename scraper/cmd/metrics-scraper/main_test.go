@@ -42,7 +42,7 @@ func TestLocalConfig(t *testing.T) {
 }
 
 func TestDeploymentConfig(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "metrics-scraper.yaml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "metrics-scraper.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +63,23 @@ func TestDeploymentConfig(t *testing.T) {
 	config, err := scraper.ParseConfig([]byte(configMap.Data["scraper.yaml"]))
 	if err != nil {
 		t.Fatalf("ConfigMap contains invalid scrape config: %v", err)
+	}
+	if config.EventHub == nil {
+		t.Fatal("deployment must enable Event Hub delivery")
+	}
+	for _, job := range config.Jobs {
+		if time.Duration(job.Interval) != time.Minute || job.RollingRange == nil ||
+			job.MetricsPath != "/probe/metrics/promql" || len(job.Params["format"]) != 1 ||
+			job.Params["format"][0] != "json" {
+			t.Fatalf("expected scheduled PromQL JSON collection: %+v", job)
+		}
+		for _, group := range job.StaticConfigs {
+			for _, target := range group.Targets {
+				if target != "azure-metrics:8080" {
+					t.Fatalf("target must use the exporter service: %q", target)
+				}
+			}
+		}
 	}
 	if config.Cluster == nil || len(config.Cluster.Join) != 1 ||
 		config.Cluster.Join[0] != "azure-metrics-scraper-gossip:7946" {

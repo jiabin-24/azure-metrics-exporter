@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: azure-metrics-exporter
+data:
+  workspaces.yaml: |
+    workspaces:
+      workspace-a:
+        query_endpoint: https://defaultazuremonitorworkspace-ea-f5ejfbdvancyfbam.eastasia.prometheus.monitor.azure.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: azure-metrics-exporter
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: azure-metrics-exporter
+  template:
+    metadata:
+      labels:
+        app: azure-metrics-exporter
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exporter
+          image: niuai/azure-metrics-exporter:main
+          imagePullPolicy: IfNotPresent
+          args:
+            - --server.bind=:8080
+            - --server.timeout.write=120s
+          env:
+            - name: AZURE_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: azure-metrics-exporter
+                  key: tenant-id
+            - name: AZURE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: azure-metrics-exporter
+                  key: client-id
+            - name: AZURE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: azure-metrics-exporter
+                  key: client-secret
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/azure-metrics-exporter
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: azure-metrics-exporter
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: azure-metrics
+spec:
+  type: ClusterIP
+  selector:
+    app: azure-metrics-exporter
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

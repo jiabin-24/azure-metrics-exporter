@@ -83,7 +83,7 @@ Application Options:
       --log.time                                   Show log time [$LOG_TIME]
       --azure-environment=                         Azure environment name (default: AZUREPUBLICCLOUD) [$AZURE_ENVIRONMENT]
       --azure-ad-resource-url=                     Specifies the AAD resource ID to use. If not set, it defaults to ResourceManagerEndpoint for operations with Azure Resource Manager [$AZURE_AD_RESOURCE]
-      --azure.prometheus.workspaces-file=           YAML file mapping workspace aliases to Prometheus query endpoints [$AZURE_PROMETHEUS_WORKSPACES_FILE]
+      --azure.prometheus.workspaces-file=           YAML file mapping workspace aliases to Prometheus query endpoints; empty disables loading (default: /etc/azure-metrics-exporter/workspaces.yaml) [$AZURE_PROMETHEUS_WORKSPACES_FILE]
       --azure.servicediscovery.cache=              Duration for caching Azure ServiceDiscovery of workspaces to reduce API calls (time.Duration) (default: 30m) [$AZURE_SERVICEDISCOVERY_CACHE]
       --azure.resource-tag=                        Azure Resource tags (space delimiter) (default: owner) [$AZURE_RESOURCE_TAG]
       --metrics.template=                          Template for metric name (default: {name}) [$METRIC_TEMPLATE]

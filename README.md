@@ -36,6 +36,8 @@ $env:AZURE_PROMETHEUS_WORKSPACES_FILE = ".\config\prometheus-workspaces.example.
 
 仅采集 Azure 平台指标时，可跳过此步骤。
 
+默认读取 `/etc/azure-metrics-exporter/workspaces.yaml`，挂载到此路径后无需设置环境变量或启动参数；仍可通过上述环境变量或 `--azure.prometheus.workspaces-file` 覆盖路径。默认文件不存在时会记录警告，并继续提供平台指标服务；显式指定的文件不存在或文件内容无效时启动失败。使用 `--azure.prometheus.workspaces-file=` 可禁用 workspace 文件加载。
+
 ### 3. 启动 exporter
 
 ```powershell
@@ -56,3 +58,4 @@ Invoke-RestMethod "http://127.0.0.1:8080/probe/metrics/promql?workspace=workspac
 - [详细指南：完整配置、功能说明、指标规则及 Prometheus 示例](GUIDE.md)
 - [PromQL 查询参数与 AKS 控制平面指标](PROMQL.md)
 - [独立 scraper 启动与部署](scraper/README.md)
+- [Kubernetes 部署 exporter 和 scraper，定时推送到 Event Hub](deploy/README.md)

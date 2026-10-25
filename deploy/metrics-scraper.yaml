@@ -60,8 +60,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: scraper
-          # Build and publish the updated repository image before applying.
-          image: azure-metrics-scraper:local
+          image: niuai/azure-metrics-scraper:main
           imagePullPolicy: IfNotPresent
           command: ["/azure-metrics-scraper"]
           args:
@@ -102,11 +101,11 @@ spec:
             periodSeconds: 20
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
+              cpu: 100m
+              memory: 128Mi
             limits:
-              cpu: 500m
-              memory: 256Mi
+              cpu: "1"
+              memory: 512Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

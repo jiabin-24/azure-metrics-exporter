@@ -21,7 +21,7 @@ type (
 			Environment   *string `long:"azure-environment"            env:"AZURE_ENVIRONMENT"                description:"Azure environment name" default:"AZUREPUBLICCLOUD"`
 			AdResourceUrl *string `long:"azure-ad-resource-url"        env:"AZURE_AD_RESOURCE"                description:"Specifies the AAD resource ID to use. If not set, it defaults to ResourceManagerEndpoint for operations with Azure Resource Manager"`
 			Prometheus    struct {
-				WorkspacesFile string `long:"azure.prometheus.workspaces-file" env:"AZURE_PROMETHEUS_WORKSPACES_FILE" description:"YAML file mapping workspace aliases to Prometheus query endpoints"`
+				WorkspacesFile string `long:"azure.prometheus.workspaces-file" env:"AZURE_PROMETHEUS_WORKSPACES_FILE" description:"YAML file mapping workspace aliases to Prometheus query endpoints; empty disables loading" default:"/etc/azure-metrics-exporter/workspaces.yaml"`
 			}
 			ServiceDiscovery struct {
 				CacheDuration *time.Duration `long:"azure.servicediscovery.cache"            env:"AZURE_SERVICEDISCOVERY_CACHE"                description:"Duration for caching Azure ServiceDiscovery of workspaces to reduce API calls (time.Duration)" default:"30m"`

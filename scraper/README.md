@@ -53,7 +53,7 @@ Invoke-WebRequest "http://127.0.0.1:8081/readyz"
 
 ## 核心配置
 
-本地修改 [scraper.yaml](scraper.yaml)，Kubernetes 修改[部署清单](deploy/metrics-scraper.yaml)中的 ConfigMap。
+本地修改 [scraper.yaml](scraper.yaml)，Kubernetes 修改[部署清单](../deploy/metrics-scraper.yaml)中的 ConfigMap。
 
 | 配置项 | 用法 |
 |--------|------|
@@ -143,22 +143,6 @@ services:
 
 ## Kubernetes 部署
 
-修改[部署清单](deploy/metrics-scraper.yaml)：
+部署文件统一位于仓库根目录的 [deploy](../deploy/README.md)，包含 exporter 和 scraper 两个服务。按[部署指南](../deploy/README.md)配置 workspace、Azure 身份和 Event Hub Secret，然后一次性部署，实现定时采集并推送到 Event Hub。
 
-1. 填写镜像地址，以及 ConfigMap 中的 exporter 地址、查询和 Event Hub 目标。
-2. 在同一 namespace 创建 Secret `azure-metrics-eventhub`，键为 `connection-string`。
-3. 放行 Pod 间 TCP/UDP 7946，以及到 exporter、DNS 和 Event Hubs（TCP 5671）的访问。
-
-```powershell
-docker tag azure-metrics-scraper:local <registry>/azure-metrics-scraper:v1
-docker push <registry>/azure-metrics-scraper:v1
-kubectl apply -n <namespace> -f .\scraper\deploy\metrics-scraper.yaml
-kubectl rollout status -n <namespace> deployment/azure-metrics-scraper
-kubectl logs -n <namespace> deployment/azure-metrics-scraper --follow
-```
-
-调整 `replicas` 可修改副本数。更新 ConfigMap 后重新 `apply` 并重启：
-
-```powershell
-kubectl rollout restart -n <namespace> deployment/azure-metrics-scraper
-```
+scraper 的采集参数仍位于 [metrics-scraper.yaml](../deploy/metrics-scraper.yaml) 的 ConfigMap 中，调整 Deployment 的 `replicas` 可修改副本数。

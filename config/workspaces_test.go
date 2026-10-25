@@ -50,10 +50,55 @@ func TestWorkspaceOptions(t *testing.T) {
 	if _, err := parser.ParseArgs(nil); err != nil {
 		t.Fatal(err)
 	}
+
 	if opts.Azure.Prometheus.WorkspacesFile != "workspaces.yaml" {
 		t.Fatal("workspace environment option was not parsed")
 	}
 	if _, err := parser.ParseArgs([]string{"--azure.prometheus.query-endpoint=https://old.example.com"}); err == nil {
 		t.Fatal("legacy endpoint flag was accepted")
+	}
+}
+
+func TestWorkspaceFileDefaultsAndOverrides(t *testing.T) {
+	t.Setenv("AZURE_PROMETHEUS_WORKSPACES_FILE", "")
+	if err := os.Unsetenv("AZURE_PROMETHEUS_WORKSPACES_FILE"); err != nil {
+		t.Fatal(err)
+	}
+	envPath := "environment.yaml"
+	emptyPath := ""
+	defaultPath := "/etc/azure-metrics-exporter/workspaces.yaml"
+	for _, test := range []struct {
+		name       string
+		env        *string
+		args       []string
+		want       string
+		useDefault bool
+	}{
+		{name: "default", want: "/etc/azure-metrics-exporter/workspaces.yaml", useDefault: true},
+		{name: "flag", args: []string{"--azure.prometheus.workspaces-file=custom.yaml"}, want: "custom.yaml"},
+		{name: "disabled", args: []string{"--azure.prometheus.workspaces-file="}},
+		{name: "explicit default", args: []string{"--azure.prometheus.workspaces-file=/etc/azure-metrics-exporter/workspaces.yaml"}, want: "/etc/azure-metrics-exporter/workspaces.yaml"},
+		{name: "environment", env: &envPath, want: envPath},
+		{name: "empty environment", env: &emptyPath},
+		{name: "explicit default environment", env: &defaultPath, want: defaultPath},
+		{name: "flag overrides environment", env: &envPath, args: []string{"--azure.prometheus.workspaces-file=custom.yaml"}, want: "custom.yaml"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.env != nil {
+				t.Setenv("AZURE_PROMETHEUS_WORKSPACES_FILE", *test.env)
+			}
+			var opts Opts
+			parser := flags.NewParser(&opts, flags.None)
+			if _, err := parser.ParseArgs(test.args); err != nil {
+				t.Fatal(err)
+			}
+			if got := opts.Azure.Prometheus.WorkspacesFile; got != test.want {
+				t.Fatalf("workspace file = %q, want %q", got, test.want)
+			}
+			_, envSet := os.LookupEnv("AZURE_PROMETHEUS_WORKSPACES_FILE")
+			if got := parser.FindOptionByLongName("azure.prometheus.workspaces-file").IsSetDefault() && !envSet; got != test.useDefault {
+				t.Fatalf("default option = %v, want %v", got, test.useDefault)
+			}
+		})
 	}
 }

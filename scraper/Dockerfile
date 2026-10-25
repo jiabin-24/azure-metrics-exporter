@@ -4,6 +4,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY scraper ./scraper
+COPY deploy ./deploy
 COPY internal/metricdata ./internal/metricdata
 COPY metrics ./metrics
 COPY config ./config

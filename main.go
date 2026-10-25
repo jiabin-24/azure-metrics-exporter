@@ -62,7 +62,13 @@ func main() {
 		var err error
 		prometheusWorkspaces, err = config.LoadWorkspaces(path)
 		if err != nil {
-			logger.Fatal(err.Error())
+			_, envSet := os.LookupEnv("AZURE_PROMETHEUS_WORKSPACES_FILE")
+			option := argparser.FindOptionByLongName("azure.prometheus.workspaces-file")
+			if errors.Is(err, os.ErrNotExist) && option.IsSetDefault() && !envSet {
+				logger.Warn("default workspace file not found; workspace-based PromQL collection disabled", slog.String("path", path))
+			} else {
+				logger.Fatal(err.Error())
+			}
 		}
 	}
 
