@@ -343,7 +343,7 @@ func TestAzureResourceClientRequestDeadline(t *testing.T) {
 }
 
 func TestAzureResourceClientCacheTTL(t *testing.T) {
-	for _, ttl := range []string{"", "2h", "0s", "-1s", "invalid"} {
+	for _, ttl := range []string{"", "2h", "6h", "0s", "-1s", "invalid"} {
 		t.Run("ttl="+ttl, func(t *testing.T) {
 			t.Setenv(armclient.EnvVarServiceDiscoveryTtl, ttl)
 			client, err := newAzureResourceClient(promQLWindowCredential{}, nil)
@@ -365,7 +365,7 @@ func TestAzureResourceClientCacheTTL(t *testing.T) {
 				}
 				return
 			}
-			want := time.Hour
+			want := 6 * time.Hour
 			if ttl == "2h" {
 				want = 2 * time.Hour
 			}

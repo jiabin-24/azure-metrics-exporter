@@ -24,7 +24,7 @@ type azureResourceClient struct {
 }
 
 func newAzureResourceClient(credential azcore.TokenCredential, options *arm.ClientOptions) (*azureResourceClient, error) {
-	ttl := time.Hour
+	ttl := 6 * time.Hour
 	if value := os.Getenv(armclient.EnvVarServiceDiscoveryTtl); value != "" {
 		var err error
 		ttl, err = time.ParseDuration(value)
