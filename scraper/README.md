@@ -117,7 +117,9 @@ cluster:
 
 ## Docker Compose
 
-构建镜像：
+镜像发布工作流会同时构建并推送 `niuai/azure-metrics-scraper`，支持 `linux/amd64` 和 `linux/arm64`，标签规则与 exporter 一致。发布后可使用 `niuai/azure-metrics-scraper:<tag>`。
+
+也可在本地构建镜像：
 
 ```powershell
 docker build -f .\scraper\Dockerfile -t azure-metrics-scraper:local .

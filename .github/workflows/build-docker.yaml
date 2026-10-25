@@ -33,13 +33,23 @@ jobs:
       matrix:
         include:
           - Dockerfile: Dockerfile
+            image: niuai/azure-metrics-exporter
+            readme: README.md
             target: "final-static"
             suffix: ""
             latest: "auto"
           - Dockerfile: Dockerfile
+            image: niuai/azure-metrics-exporter
+            readme: README.md
             target: "final-azcli"
             suffix: "-azcli"
             latest: false
+          - Dockerfile: scraper/Dockerfile
+            image: niuai/azure-metrics-scraper
+            readme: scraper/README.md
+            target: "final"
+            suffix: ""
+            latest: "auto"
 
     runs-on: ubuntu-latest
     steps:
@@ -56,9 +66,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            niuai/azure-metrics-exporter
+            ${{ matrix.image }}
           labels: |
-            io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.repository.default_branch }}/README.md
+            io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.repository.default_branch }}/${{ matrix.readme }}
           flavor: |
             latest=${{ matrix.latest }}
             suffix=${{ matrix.suffix }}
