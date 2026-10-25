@@ -2,13 +2,6 @@ name: "release/docker"
 
 on:
   workflow_dispatch: {}
-  push:
-    branches:
-      - 'main'
-      - 'feature-**'
-      - 'bugfix-**'
-    tags:
-      - '*.*.*'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
