@@ -43,6 +43,16 @@ func TestLoadWorkspaces(t *testing.T) {
 	}
 }
 
+func TestProjectWorkspaces(t *testing.T) {
+	workspaces, err := LoadWorkspaces("prometheus-workspaces.yaml")
+	if err != nil {
+		t.Fatalf("project contains invalid workspace config: %v", err)
+	}
+	if len(workspaces) == 0 {
+		t.Fatal("project workspace config must not be empty")
+	}
+}
+
 func TestWorkspaceOptions(t *testing.T) {
 	t.Setenv("AZURE_PROMETHEUS_WORKSPACES_FILE", "workspaces.yaml")
 	var opts Opts

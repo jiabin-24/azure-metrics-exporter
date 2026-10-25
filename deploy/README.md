@@ -8,16 +8,17 @@
 Azure Monitor workspace <- exporter (azure-metrics:8080) <- scraper -> Azure Event Hubs
 ```
 
-- [metrics-exporter.yaml](metrics-exporter.yaml)：exporter Deployment、ClusterIP Service 和 workspace ConfigMap。
-- [metrics-scraper.yaml](metrics-scraper.yaml)：scraper Deployment、采集 ConfigMap 和 memberlist headless Service。
-- scraper 默认每分钟采集全部已配置 workspace 的 `apiserver_request_total`，查询最近一分钟、步长 15 秒，并将 JSON 发送到 Event Hub。两个副本通过 memberlist 分配采集任务，不是每个副本重复采集全部任务。
+- [metrics-exporter.yaml](metrics-exporter.yaml)：exporter Deployment 和 ClusterIP Service。
+- [metrics-scraper.yaml](metrics-scraper.yaml)：scraper Deployment 和 memberlist headless Service。
+- [kustomization.yaml](kustomization.yaml)：组合两个服务并生成配置 ConfigMap；workspace 来源为 [config/prometheus-workspaces.yaml](../config/prometheus-workspaces.yaml)，采集配置统一来源为 [scraper/scraper.yaml](../scraper/scraper.yaml)。
+- scraper 默认每分钟执行共享配置中的 18 个 PromQL 采集任务，查询全部已配置 workspace，使用最近一分钟窗口、15 秒步长，并将 JSON 发送到 Event Hub。两个副本通过 memberlist 分配采集任务，不是每个副本重复采集全部任务。
 
 以下 PowerShell 命令均在仓库根目录执行。需要可访问的 Kubernetes 集群、已发布的镜像、Azure Monitor workspace 和 Event Hub。
 
 ## 1. 修改配置
 
-1. 在 [exporter 清单](metrics-exporter.yaml) 中填写真实的 workspace Prometheus 查询终结点；可增加多个 workspace。
-2. 在 [scraper 清单](metrics-scraper.yaml) 中确认 `event_hub.namespace`、`event_hub.name`、PromQL 查询及静态标签。保持目标地址 `azure-metrics:8080` 与 Service 一致。
+1. 在 [workspace 配置](../config/prometheus-workspaces.yaml) 中填写真实的 workspace Prometheus 查询终结点；可增加多个 workspace。此文件同时用于本地运行和 Kubernetes ConfigMap 生成，无需在部署清单中重复维护。
+2. 在唯一的[采集配置](../scraper/scraper.yaml)中确认 `event_hub.namespace`、`event_hub.name`、PromQL 查询及静态标签（例如将 `environment: development` 改为实际环境）。保持目标地址 `azure-metrics:8080` 与 Service 一致，并保留默认的 memberlist 配置。
 3. 默认镜像为 `niuai/azure-metrics-exporter:main` 和 `niuai/azure-metrics-scraper:main`，需先由镜像发布工作流推送。生产环境建议将两个镜像改为同一发布版本标签或固定 digest。
 4. 如 Azure Monitor 存在入库延迟，调整 `rolling_range.delay`；抓取较慢时同时调整 `scrape_timeout` 和 exporter 的写超时，前者不得超过 `scrape_interval`。
 
@@ -65,7 +66,8 @@ Remove-Variable connectionString
 ## 3. 部署和检查
 
 ```powershell
-kubectl apply -n $namespace -f .\deploy\
+kubectl kustomize .\deploy\
+kubectl apply -n $namespace -k .\deploy\
 kubectl rollout status -n $namespace deployment/azure-metrics-exporter
 kubectl rollout status -n $namespace deployment/azure-metrics-scraper
 kubectl get pods,services -n $namespace
@@ -79,12 +81,15 @@ scraper 不持久化数据，也不是补采队列；重启或成员收敛期间
 
 ## 4. 更新配置
 
-修改 ConfigMap 后重新应用并重启对应服务；增删 workspace 时两个服务都需重启：
+修改 workspace 或采集配置源文件后，使用 `-k` 重新部署，不要使用 `-f .\deploy\`。Kustomize 会为生成的 ConfigMap 添加内容哈希，并自动更新 Deployment 的挂载引用，触发对应服务滚动更新。Secret 引用保持原名，不参与此哈希替换。
+
+仅修改采集配置时，重新应用并等待 scraper 滚动更新即可。修改 workspace 配置时，先等待 exporter 更新完成，再重启 scraper，使其重新发现 workspace：
 
 ```powershell
-kubectl apply -n $namespace -f .\deploy\
-kubectl rollout restart -n $namespace deployment/azure-metrics-exporter
+kubectl apply -n $namespace -k .\deploy\
 kubectl rollout status -n $namespace deployment/azure-metrics-exporter
 kubectl rollout restart -n $namespace deployment/azure-metrics-scraper
 kubectl rollout status -n $namespace deployment/azure-metrics-scraper
 ```
+
+生成的旧 ConfigMap 不会随 `apply` 自动删除；确认旧 Pod 已退出后，可按实际使用情况清理不再引用的 ConfigMap。

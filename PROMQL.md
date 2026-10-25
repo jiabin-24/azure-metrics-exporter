@@ -19,7 +19,7 @@
 <a id="endpoint-and-auth"></a>
 ## 查询终结点与权限
 
-从 **Azure Monitor 工作区**概述页复制 Prometheus 查询终结点，填写 [workspace 配置文件](config/prometheus-workspaces.example.yaml)，并设置文件路径：
+从 **Azure Monitor 工作区**概述页复制 Prometheus 查询终结点，填写 [workspace 配置文件](config/prometheus-workspaces.yaml)，并设置文件路径：
 
 ```text
 AZURE_PROMETHEUS_WORKSPACES_FILE=<path-to-workspaces.yaml>
@@ -521,7 +521,7 @@ az account set --subscription "<subscription-id>"
 $env:AZURE_AUTH = "azcli"
 
 # 先替换配置文件中的占位符；单个 workspace 只保留 workspace-a 条目
-$env:AZURE_PROMETHEUS_WORKSPACES_FILE = (Resolve-Path ".\config\prometheus-workspaces.example.yaml").Path
+$env:AZURE_PROMETHEUS_WORKSPACES_FILE = (Resolve-Path ".\config\prometheus-workspaces.yaml").Path
 
 # 编译到当前目录
 go build -o azure-metrics-exporter.exe .

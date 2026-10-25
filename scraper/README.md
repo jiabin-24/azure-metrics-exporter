@@ -10,7 +10,7 @@
 
 按[项目配置](../GUIDE.md#configuration)设置 Azure 身份，授予各 workspace 的 `Monitoring Data Reader` 权限。需要自动补充资源区域时，还需具有对应 Azure 资源的读取权限。
 
-修改 [workspace 配置文件](../config/prometheus-workspaces.example.yaml)，填写真实查询终结点：
+修改 [workspace 配置文件](../config/prometheus-workspaces.yaml)，填写真实查询终结点：
 
 ```yaml
 workspaces:
@@ -21,13 +21,13 @@ workspaces:
 在第一个终端启动，必须显式指定 workspace 文件：
 
 ```powershell
-$env:AZURE_PROMETHEUS_WORKSPACES_FILE = ".\config\prometheus-workspaces.example.yaml"
+$env:AZURE_PROMETHEUS_WORKSPACES_FILE = ".\config\prometheus-workspaces.yaml"
 go run . --server.timeout.write=120s
 ```
 
 ### 2. 启动 scraper
 
-修改 [scraper.yaml](scraper.yaml) 中的 Event Hub namespace、name，以及 `&exporter_targets` 定义的 exporter 地址。
+统一使用 [scraper.yaml](scraper.yaml)，默认配置面向 Kubernetes。修改其中的 Event Hub namespace、name；本地单实例启动时，将 `&exporter_targets` 定义的地址改为 `127.0.0.1:8080`，并移除或注释整个 `cluster` 配置。改回 Kubernetes 部署前，恢复 `azure-metrics:8080` 和 memberlist 配置。
 
 在第二个终端输入具有 **Send** 权限的 SAS 连接字符串并启动：
 
@@ -53,7 +53,7 @@ Invoke-WebRequest "http://127.0.0.1:8081/readyz"
 
 ## 核心配置
 
-本地修改 [scraper.yaml](scraper.yaml)，Kubernetes 修改[部署清单](../deploy/metrics-scraper.yaml)中的 ConfigMap。
+本地和 Kubernetes 共用唯一的 [scraper.yaml](scraper.yaml)，Kustomize 直接从此文件生成 ConfigMap，不维护额外的部署配置副本。
 
 | 配置项 | 用法 |
 |--------|------|
@@ -145,4 +145,4 @@ services:
 
 部署文件统一位于仓库根目录的 [deploy](../deploy/README.md)，包含 exporter 和 scraper 两个服务。按[部署指南](../deploy/README.md)配置 workspace、Azure 身份和 Event Hub Secret，然后一次性部署，实现定时采集并推送到 Event Hub。
 
-scraper 的采集参数仍位于 [metrics-scraper.yaml](../deploy/metrics-scraper.yaml) 的 ConfigMap 中，调整 Deployment 的 `replicas` 可修改副本数。
+scraper 的采集参数统一位于 [scraper.yaml](scraper.yaml)，调整 [metrics-scraper.yaml](../deploy/metrics-scraper.yaml) 中 Deployment 的 `replicas` 可修改副本数。

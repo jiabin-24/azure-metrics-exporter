@@ -20,7 +20,7 @@ az account set --subscription "<subscription-id>"
 
 ### 2. 配置 workspace
 
-采集 PromQL 时，修改 [workspace 配置文件](config/prometheus-workspaces.example.yaml)，填写 Azure Monitor workspace 的 Prometheus 查询终结点：
+采集 PromQL 时，修改 [workspace 配置文件](config/prometheus-workspaces.yaml)，填写 Azure Monitor workspace 的 Prometheus 查询终结点：
 
 ```yaml
 workspaces:
@@ -31,7 +31,7 @@ workspaces:
 设置文件路径：
 
 ```powershell
-$env:AZURE_PROMETHEUS_WORKSPACES_FILE = ".\config\prometheus-workspaces.example.yaml"
+$env:AZURE_PROMETHEUS_WORKSPACES_FILE = ".\config\prometheus-workspaces.yaml"
 ```
 
 仅采集 Azure 平台指标时，可跳过此步骤。

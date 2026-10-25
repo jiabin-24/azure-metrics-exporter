@@ -19,22 +19,22 @@ import (
 	"go.yaml.in/yaml/v2"
 )
 
-func TestLocalConfig(t *testing.T) {
+func TestSharedScrapeConfig(t *testing.T) {
 	cfg, err := scraper.LoadConfig(filepath.Join("..", "..", "scraper.yaml"))
 	if err != nil {
 		t.Fatalf("project contains invalid scrape config: %v", err)
 	}
 	if len(cfg.Jobs) != 18 {
-		t.Fatalf("local config should contain 18 metric jobs, got %d", len(cfg.Jobs))
+		t.Fatalf("shared config should contain 18 metric jobs, got %d", len(cfg.Jobs))
 	}
 	for _, job := range cfg.Jobs {
 		if job.MetricName != job.Name {
-			t.Fatalf("local job %q should explicitly export its business metric name, got %q", job.Name, job.MetricName)
+			t.Fatalf("shared job %q should explicitly export its business metric name, got %q", job.Name, job.MetricName)
 		}
 		for _, group := range job.StaticConfigs {
 			for _, target := range group.Targets {
-				if target != "127.0.0.1:8080" {
-					t.Fatalf("local job %q should target the local exporter, got %q", job.Name, target)
+				if target != "azure-metrics:8080" {
+					t.Fatalf("shared job %q should target the exporter service, got %q", job.Name, target)
 				}
 			}
 		}
@@ -47,22 +47,9 @@ func TestDeploymentConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
-	var configMap struct {
-		Kind     string `yaml:"kind"`
-		Metadata struct {
-			Name string `yaml:"name"`
-		} `yaml:"metadata"`
-		Data map[string]string `yaml:"data"`
-	}
-	if err := decoder.Decode(&configMap); err != nil {
-		t.Fatal(err)
-	}
-	if configMap.Kind != "ConfigMap" || configMap.Metadata.Name != "azure-metrics-scraper" {
-		t.Fatalf("unexpected ConfigMap: %+v", configMap)
-	}
-	config, err := scraper.ParseConfig([]byte(configMap.Data["scraper.yaml"]))
+	config, err := scraper.LoadConfig(filepath.Join("..", "..", "scraper.yaml"))
 	if err != nil {
-		t.Fatalf("ConfigMap contains invalid scrape config: %v", err)
+		t.Fatalf("deployment contains invalid scrape config: %v", err)
 	}
 	if config.EventHub == nil {
 		t.Fatal("deployment must enable Event Hub delivery")
@@ -145,7 +132,7 @@ func TestDeploymentConfig(t *testing.T) {
 	mount := containers[0].VolumeMounts[0]
 	volume := deployment.Spec.Template.Spec.Volumes[0]
 	if mount.Name != volume.Name || mount.MountPath != "/etc/azure-metrics-scraper" ||
-		!mount.ReadOnly || volume.ConfigMap.Name != configMap.Metadata.Name {
+		!mount.ReadOnly || volume.ConfigMap.Name != "azure-metrics-scraper" {
 		t.Fatalf("deployment does not mount the ConfigMap correctly: mount=%+v volume=%+v", mount, volume)
 	}
 	foundIP, foundAdvertise := false, false
@@ -205,7 +192,7 @@ func TestDeploymentConfig(t *testing.T) {
 	}
 	var extraDocument interface{}
 	if err := decoder.Decode(&extraDocument); !errors.Is(err, io.EOF) {
-		t.Fatalf("expected only a ConfigMap, Deployment and headless Service, got another YAML document or error: %v", err)
+		t.Fatalf("expected only a Deployment and headless Service, got another YAML document or error: %v", err)
 	}
 }
 

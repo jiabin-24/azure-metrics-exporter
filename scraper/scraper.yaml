@@ -2,11 +2,11 @@ global:
   scrape_interval: 1m
   scrape_timeout: 30s
 
-# Omit cluster for standalone mode. Enable it on every cooperating instance.
-# cluster:
-#   name: azure-metrics-scraper
-#   bind_address: 0.0.0.0:7946
-#   join: ["<seed-host>:7946"]
+# Remove cluster for local standalone mode.
+cluster:
+  name: azure-metrics-scraper
+  bind_address: 0.0.0.0:7946
+  join: ["azure-metrics-scraper-gossip:7946"]
 
 event_hub:
   namespace: shein-aks-metrics.servicebus.windows.net
@@ -30,7 +30,7 @@ scrape_configs:
       # 即时查询：先移除 rolling_range；query_delay 不能与范围参数同时使用。
       # query_delay: ["20m"]
     static_configs:
-      - targets: &exporter_targets ["127.0.0.1:8080"]
+      - targets: &exporter_targets ["azure-metrics:8080"]
         labels:
           environment: development
 
