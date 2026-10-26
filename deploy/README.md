@@ -81,15 +81,24 @@ scraper 不持久化数据，也不是补采队列；重启或成员收敛期间
 
 ## 4. 更新配置
 
-修改 workspace 或采集配置源文件后，使用 `-k` 重新部署，不要使用 `-f .\deploy\`。Kustomize 会为生成的 ConfigMap 添加内容哈希，并自动更新 Deployment 的挂载引用，触发对应服务滚动更新。Secret 引用保持原名，不参与此哈希替换。
+修改 workspace 或采集配置源文件后，使用 `-k` 重新部署，不要使用 `-f .\deploy\`。生成的 ConfigMap 使用固定名称 `azure-metrics-exporter` 和 `azure-metrics-scraper`，不添加内容哈希后缀。更新 ConfigMap 不会自动触发 Deployment 滚动更新，需要手动重启对应服务。Secret 引用保持原名。
 
-仅修改采集配置时，重新应用并等待 scraper 滚动更新即可。修改 workspace 配置时，先等待 exporter 更新完成，再重启 scraper，使其重新发现 workspace：
+仅修改采集配置时，重新应用后重启 scraper：
 
 ```powershell
 kubectl apply -n $namespace -k .\deploy\
+kubectl rollout restart -n $namespace deployment/azure-metrics-scraper
+kubectl rollout status -n $namespace deployment/azure-metrics-scraper
+```
+
+修改 workspace 配置时，先重启 exporter 并等待更新完成，再重启 scraper，使其重新发现 workspace：
+
+```powershell
+kubectl apply -n $namespace -k .\deploy\
+kubectl rollout restart -n $namespace deployment/azure-metrics-exporter
 kubectl rollout status -n $namespace deployment/azure-metrics-exporter
 kubectl rollout restart -n $namespace deployment/azure-metrics-scraper
 kubectl rollout status -n $namespace deployment/azure-metrics-scraper
 ```
 
-生成的旧 ConfigMap 不会随 `apply` 自动删除；确认旧 Pod 已退出后，可按实际使用情况清理不再引用的 ConfigMap。
+从带哈希后缀的旧部署迁移时，旧 ConfigMap 不会随 `apply` 自动删除；确认旧 Pod 已退出后，可清理不再引用的带哈希后缀 ConfigMap。后续配置更新会复用固定名称的 ConfigMap，无需清理历史版本。
