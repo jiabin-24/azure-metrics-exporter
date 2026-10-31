@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -30,7 +31,6 @@ type exportWindow struct {
 	SchemaVersion  string         `json:"schemaVersion"`
 	Source         string         `json:"source"`
 	Workspace      string         `json:"workspace,omitempty"`
-	TaskID         string         `json:"taskId,omitempty"`
 	Cluster        string         `json:"cluster,omitempty"`
 	ResourceID     string         `json:"resourceId,omitempty"`
 	Query          *exportQuery   `json:"query,omitempty"`
@@ -97,6 +97,13 @@ func validateConnectionString(connection string, cfg EventHubConfig) error {
 }
 
 func NewEventHubSink(cfg EventHubConfig, logger *slog.Logger) (Sink, func(context.Context) error, error) {
+	window := time.Duration(cfg.BatchWindow)
+	if window == 0 {
+		window = 5 * time.Second
+	}
+	if window < 0 {
+		return nil, nil, fmt.Errorf("Event Hub batch_window must be positive")
+	}
 	connection := os.Getenv("AZURE_EVENTHUB_CONNECTION_STRING")
 	if err := validateConnectionString(connection, cfg); err != nil {
 		return nil, nil, err
@@ -106,52 +113,69 @@ func NewEventHubSink(cfg EventHubConfig, logger *slog.Logger) (Sink, func(contex
 		// Do not include SDK constructor errors that might contain credential input.
 		return nil, nil, fmt.Errorf("create Event Hub SAS producer: invalid connection configuration")
 	}
-	return eventHubSink(eventHubSender{client}, logger), client.Close, nil
+	buffer := newEventHubBuffer(eventHubSender{client}, logger, window)
+	return buffer.Send, func(ctx context.Context) error {
+		return errors.Join(buffer.Close(ctx), client.Close(ctx))
+	}, nil
 }
 
 func eventHubSink(sender eventSender, logger *slog.Logger) Sink {
 	return func(ctx context.Context, batch Batch) error {
-		logger := logger.With("workspace", batch.Workspace, "task_id", batch.TaskID)
-		windows, err := exportWindows(batch)
+		windows, err := windowsForExport(batch, logger)
 		if err != nil {
 			return err
 		}
-		type event struct {
-			body         []byte
-			partitionKey string
-		}
-		var events []event
-		for _, window := range windows {
-			if window.Region == "" {
-				logger.Warn("region/location label missing; exporting empty region",
-					"job", batch.Job, "cluster", window.Cluster, "resource_id", window.ResourceID)
-			}
-			if window.Source == metricdata.Source && window.ResourceID == "" {
-				logger.Warn("resourceID label missing; exporting without resourceId",
-					"job", batch.Job, "target", batch.Target)
-			}
-			bodies, err := splitWindow(window, eventBodyLimit)
-			if err != nil {
-				return err
-			}
-			for _, body := range bodies {
-				events = append(events, event{body, window.partitionKey})
-			}
-		}
-		if len(events) == 0 {
-			logger.Info("empty metrics result; no Event Hub events sent", "job", batch.Job, "target", batch.Target)
-			return nil
-		}
-		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-		for i, event := range events {
-			if err := sender.Send(ctx, event.body, event.partitionKey); err != nil {
-				return fmt.Errorf("delivery to Event Hub failed after %d/%d acknowledged events (delivery may be partial): %w", i, len(events), err)
-			}
-		}
-		logger.Info("Event Hub delivery completed", "job", batch.Job, "target", batch.Target, "events", len(events))
-		return nil
+		return sendWindows(ctx, sender, logger, windows)
 	}
+}
+
+func windowsForExport(batch Batch, logger *slog.Logger) ([]exportWindow, error) {
+	windows, err := exportWindows(batch)
+	if err != nil {
+		return nil, err
+	}
+	for _, window := range windows {
+		if window.Region == "" {
+			logger.Warn("region/location label missing; exporting empty region",
+				"job", batch.Job, "workspace", batch.Workspace, "cluster", window.Cluster, "resource_id", window.ResourceID)
+		}
+		if window.Source == metricdata.Source && window.ResourceID == "" {
+			logger.Warn("resourceID label missing; exporting without resourceId",
+				"job", batch.Job, "target", batch.Target)
+		}
+	}
+	if len(windows) == 0 {
+		logger.Info("empty metrics result; no Event Hub events sent", "job", batch.Job, "target", batch.Target)
+	}
+	return windows, nil
+}
+
+func sendWindows(ctx context.Context, sender eventSender, logger *slog.Logger, windows []exportWindow) error {
+	type event struct {
+		body         []byte
+		partitionKey string
+	}
+	var events []event
+	for _, window := range windows {
+		bodies, err := splitWindow(window, eventBodyLimit)
+		if err != nil {
+			return err
+		}
+		for _, body := range bodies {
+			events = append(events, event{body, window.partitionKey})
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for i, event := range events {
+		if err := sender.Send(ctx, event.body, event.partitionKey); err != nil {
+			return fmt.Errorf("delivery to Event Hub failed after %d/%d acknowledged events (delivery may be partial): %w", i, len(events), err)
+		}
+	}
+	if len(events) > 0 {
+		logger.Info("Event Hub delivery completed", "events", len(events))
+	}
+	return nil
 }
 
 func exportWindows(batch Batch) ([]exportWindow, error) {
@@ -207,8 +231,8 @@ func exportWindows(batch Batch) ([]exportWindow, error) {
 		if window == nil {
 			window = &exportWindow{
 				SchemaVersion: metricdata.SchemaVersion, Source: "aks-controlplane",
-				Workspace: batch.Workspace, TaskID: batch.TaskID,
-				Cluster: cluster, Region: region, ScrapeInterval: batch.Interval.String(),
+				Workspace: batch.Workspace,
+				Cluster:   cluster, Region: region, ScrapeInterval: batch.Interval.String(),
 				Metrics:      make([]exportMetric, 0),
 				partitionKey: fmt.Sprintf("%x", sha256.Sum256([]byte(batch.Workspace+"\x00"+cluster))),
 			}
@@ -259,32 +283,77 @@ func exportWindows(batch Batch) ([]exportWindow, error) {
 }
 
 func splitWindow(window exportWindow, limit int) ([][]byte, error) {
-	body, err := json.Marshal(window)
+	metrics := window.Metrics
+	window.Metrics = make([]exportMetric, 0)
+	empty, err := json.Marshal(window)
 	if err != nil {
 		return nil, fmt.Errorf("encode metrics event: %w", err)
 	}
-	if len(body) <= limit {
-		return [][]byte{body}, nil
+	size := len(empty)
+	var bodies [][]byte
+	emit := func() error {
+		body, err := json.Marshal(window)
+		if err != nil {
+			return fmt.Errorf("encode metrics event: %w", err)
+		}
+		bodies = append(bodies, body)
+		window.Metrics = make([]exportMetric, 0)
+		size = len(empty)
+		return nil
 	}
-	left, right := window, window
-	if len(window.Metrics) > 1 {
-		mid := len(window.Metrics) / 2
-		left.Metrics, right.Metrics = window.Metrics[:mid], window.Metrics[mid:]
-	} else if len(window.Metrics) == 1 && len(window.Metrics[0].Samples) > 1 {
-		first, second := window.Metrics[0], window.Metrics[0]
-		mid := len(first.Samples) / 2
-		first.Samples, second.Samples = first.Samples[:mid], second.Samples[mid:]
-		left.Metrics, right.Metrics = []exportMetric{first}, []exportMetric{second}
-	} else {
-		return nil, fmt.Errorf("single metric sample exceeds Event Hub event body limit of %d bytes", limit)
+	for _, metric := range metrics {
+		for {
+			data, err := json.Marshal(metric)
+			if err != nil {
+				return nil, fmt.Errorf("encode metrics event: %w", err)
+			}
+			added := len(data)
+			if len(window.Metrics) > 0 {
+				added++
+			}
+			if size+added <= limit {
+				window.Metrics = append(window.Metrics, metric)
+				size += added
+				break
+			}
+			if len(window.Metrics) > 0 {
+				if err := emit(); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			// Only split a series when it cannot fit in an otherwise empty event.
+			low, high := 0, len(metric.Samples)
+			for low < high {
+				mid := low + (high-low+1)/2
+				part := metric
+				part.Samples = metric.Samples[:mid]
+				data, err := json.Marshal(part)
+				if err != nil {
+					return nil, fmt.Errorf("encode metrics event: %w", err)
+				}
+				if len(empty)+len(data) <= limit {
+					low = mid
+				} else {
+					high = mid - 1
+				}
+			}
+			if low == 0 {
+				return nil, fmt.Errorf("single metric sample exceeds Event Hub event body limit of %d bytes", limit)
+			}
+			part := metric
+			part.Samples = metric.Samples[:low]
+			window.Metrics = append(window.Metrics, part)
+			if err := emit(); err != nil {
+				return nil, err
+			}
+			metric.Samples = metric.Samples[low:]
+		}
 	}
-	first, err := splitWindow(left, limit)
-	if err != nil {
-		return nil, err
+	if len(window.Metrics) > 0 {
+		if err := emit(); err != nil {
+			return nil, err
+		}
 	}
-	second, err := splitWindow(right, limit)
-	if err != nil {
-		return nil, err
-	}
-	return append(first, second...), nil
+	return bodies, nil
 }

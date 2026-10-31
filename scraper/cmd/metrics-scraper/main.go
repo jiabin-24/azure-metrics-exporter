@@ -42,7 +42,7 @@ func run(ctx context.Context, configPath, address string, logger *slog.Logger) (
 			return err
 		}
 		defer func() {
-			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			closeCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 			defer cancel()
 			if err := closeProducer(closeCtx); err != nil {
 				resultErr = errors.Join(resultErr, fmt.Errorf("close Event Hub producer: %w", err))

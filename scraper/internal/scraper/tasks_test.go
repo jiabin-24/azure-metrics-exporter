@@ -189,8 +189,8 @@ func TestWorkspaceEventProvenanceAndPartitionIsolation(t *testing.T) {
 	if err := json.Unmarshal(bodies[0], &fields); err != nil {
 		t.Fatal(err)
 	}
-	if string(fields["workspace"]) != `"workspace-a"` || string(fields["taskId"]) != `"`+batch.TaskID+`"` {
-		t.Fatalf("event provenance missing: %s", bodies[0])
+	if string(fields["workspace"]) != `"workspace-a"` || fields["taskId"] != nil {
+		t.Fatalf("workspace missing or internal task ID leaked: %s", bodies[0])
 	}
 }
 

@@ -58,8 +58,9 @@ type Config struct {
 }
 
 type EventHubConfig struct {
-	Namespace string `yaml:"namespace"`
-	Name      string `yaml:"name"`
+	Namespace   string   `yaml:"namespace"`
+	Name        string   `yaml:"name"`
+	BatchWindow Duration `yaml:"batch_window"`
 }
 
 type Job struct {
@@ -131,6 +132,9 @@ func ParseConfig(data []byte) (*Config, error) {
 		}
 	}
 	if cfg.EventHub != nil {
+		if cfg.EventHub.BatchWindow == 0 {
+			cfg.EventHub.BatchWindow = Duration(5 * time.Second)
+		}
 		if !regexp.MustCompile(`^[a-zA-Z0-9-]+\.servicebus\.windows\.net$`).MatchString(cfg.EventHub.Namespace) ||
 			!regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`).MatchString(cfg.EventHub.Name) {
 			return nil, fmt.Errorf("event_hub requires a servicebus.windows.net namespace hostname and a valid hub name")
