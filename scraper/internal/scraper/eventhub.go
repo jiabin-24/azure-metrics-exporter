@@ -102,7 +102,7 @@ func NewEventHubSink(cfg EventHubConfig, logger *slog.Logger) (Sink, func(contex
 		window = 5 * time.Second
 	}
 	if window < 0 {
-		return nil, nil, fmt.Errorf("Event Hub batch_window must be positive")
+		return nil, nil, fmt.Errorf("event hub batch_window must be positive")
 	}
 	connection := os.Getenv("AZURE_EVENTHUB_CONNECTION_STRING")
 	if err := validateConnectionString(connection, cfg); err != nil {

@@ -53,7 +53,7 @@ func (b *eventHubBuffer) Send(ctx context.Context, batch Batch) error {
 	request := windowRequest{windows: windows, result: make(chan error, 1)}
 	select {
 	case <-b.done:
-		return fmt.Errorf("Event Hub buffer is closed")
+		return fmt.Errorf("event hub buffer is closed")
 	case <-ctx.Done():
 		return ctx.Err()
 	case b.requests <- request:
@@ -106,7 +106,8 @@ func (b *eventHubBuffer) run(sender eventSender, interval time.Duration) {
 				tick = timer.C
 			}
 		case <-tick:
-			flush(context.Background())
+			// flush logs errors and returns them to the pending requests.
+			_ = flush(context.Background())
 			timer, tick = nil, nil
 		case ctx := <-b.stop:
 			if timer != nil {
