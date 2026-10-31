@@ -134,7 +134,7 @@ params:
 - 缺少 `region` / `location` 时，exporter 根据资源 ID 直接查询单个 Azure 资源，不列举整个订阅的资源。首次查询会获取并缓存对应提供程序的 API 版本信息，优先使用最新稳定版；资源结果和提供程序信息默认缓存 6 小时，可通过 `AZURE_SERVICEDISCOVERY_CACHE_TTL` 调整。同一资源的并发查询仍会合并，共享查询最多 5 秒；失败只告警，不丢弃指标，也不缓存失败结果。
 - `NaN` / `±Inf` 无法表示为标准 JSON number，JSON 模式返回失败，不替换成零；native histogram 样本暂不支持，出现时也明确报错。
 - `format` 是 exporter 参数，不转发给 Azure。`query_delay` 仍只支持即时查询；JSON 模式不会放宽它与 `time`、`start`、`end`、`step` 的互斥规则。
-- 这里的固定 `start/end` 适合调试历史窗口，不会自动更新。独立 scraper 可通过 job 级别的 [`rolling_range`](scraper/README.md#promql-滚动查询范围) 每次动态生成查询范围，并将 JSON 发送到 Event Hub；`rolling_range` 不是 exporter HTTP 参数，也不能与固定范围或即时查询时间参数同时使用。
+- 这里的固定 `start/end` 适合调试历史窗口，不会自动更新。独立 scraper 可通过全局或 job 级别的 [`rolling_range`](scraper/README.md#promql-滚动查询范围) 每次动态生成查询范围，并将 JSON 发送到 Event Hub；job 按字段覆盖全局值，设置 `enabled: false` 可关闭继承。`rolling_range` 不是 exporter HTTP 参数，也不能与固定范围或即时查询时间参数同时使用。
 - Prometheus 本身不能将此 JSON 当作抓取文本；应由 [scraper](scraper/README.md#promql-json-采集) 等客户端读取。原有 Prometheus jobs 不添加 `format=json` 即可保持不变。
 
 ### 入库延迟与动态查询时间

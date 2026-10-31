@@ -53,27 +53,28 @@ scrape_configs:
 func TestConfigRejectsInvalidInput(t *testing.T) {
 	base := "scrape_configs:\n  - job_name: test\n    static_configs:\n      - targets: ['exporter:8080']\n"
 	tests := map[string]string{
-		"empty":             "",
-		"unknown field":     base + "    relabel_configs: []\n",
-		"duplicate key":     base + "    job_name: other\n",
-		"zero interval":     base + "    scrape_interval: 0s\n",
-		"negative timeout":  base + "    scrape_timeout: -1s\n",
-		"invalid duration":  base + "    scrape_interval: 1d\n",
-		"timeout too long":  base + "    scrape_interval: 1s\n    scrape_timeout: 2s\n",
-		"invalid scheme":    base + "    scheme: ftp\n",
-		"relative path":     base + "    metrics_path: metrics\n",
-		"path query":        base + "    metrics_path: /metrics?query=up\n",
-		"timestamp rewrite": base + "    honor_timestamps: false\n",
-		"global timing":     "global:\n  scrape_interval: 1s\n  scrape_timeout: 2s\n" + base,
-		"duplicate jobs":    base + strings.TrimPrefix(base, "scrape_configs:\n"),
-		"missing name":      strings.Replace(base, "job_name: test", "job_name: ''", 1),
-		"no targets":        strings.Replace(base, "['exporter:8080']", "[]", 1),
-		"full URL target":   strings.Replace(base, "exporter:8080", "http://exporter:8080", 1),
-		"target path":       strings.Replace(base, "exporter:8080", "exporter:8080/metrics", 1),
-		"target port":       strings.Replace(base, "exporter:8080", "exporter:99999", 1),
-		"target auth":       strings.Replace(base, "exporter:8080", "user:pass@exporter:8080", 1),
-		"duplicate target":  strings.Replace(base, "['exporter:8080']", "['exporter:8080', 'exporter:8080']", 1),
-		"invalid label":     base + "        labels: {'bad-label': prod}\n",
+		"empty":                    "",
+		"unknown field":            base + "    relabel_configs: []\n",
+		"duplicate key":            base + "    job_name: other\n",
+		"zero interval":            base + "    scrape_interval: 0s\n",
+		"negative timeout":         base + "    scrape_timeout: -1s\n",
+		"invalid duration":         base + "    scrape_interval: 1d\n",
+		"timeout too long":         base + "    scrape_interval: 1s\n    scrape_timeout: 2s\n",
+		"invalid scheme":           base + "    scheme: ftp\n",
+		"relative path":            base + "    metrics_path: metrics\n",
+		"path query":               base + "    metrics_path: /metrics?query=up\n",
+		"timestamp rewrite":        base + "    honor_timestamps: false\n",
+		"global timestamp rewrite": "global:\n  honor_timestamps: false\n" + base,
+		"global timing":            "global:\n  scrape_interval: 1s\n  scrape_timeout: 2s\n" + base,
+		"duplicate jobs":           base + strings.TrimPrefix(base, "scrape_configs:\n"),
+		"missing name":             strings.Replace(base, "job_name: test", "job_name: ''", 1),
+		"no targets":               strings.Replace(base, "['exporter:8080']", "[]", 1),
+		"full URL target":          strings.Replace(base, "exporter:8080", "http://exporter:8080", 1),
+		"target path":              strings.Replace(base, "exporter:8080", "exporter:8080/metrics", 1),
+		"target port":              strings.Replace(base, "exporter:8080", "exporter:99999", 1),
+		"target auth":              strings.Replace(base, "exporter:8080", "user:pass@exporter:8080", 1),
+		"duplicate target":         strings.Replace(base, "['exporter:8080']", "['exporter:8080', 'exporter:8080']", 1),
+		"invalid label":            base + "        labels: {'bad-label': prod}\n",
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -81,6 +82,34 @@ func TestConfigRejectsInvalidInput(t *testing.T) {
 				t.Fatal("expected configuration error")
 			}
 		})
+	}
+}
+
+func TestConfigGlobalHonorTimestamps(t *testing.T) {
+	const base = `
+global:
+  honor_timestamps: true
+scrape_configs:
+- job_name: inherited
+  static_configs:
+  - targets: [localhost]
+- job_name: overridden
+  honor_timestamps: true
+  static_configs:
+  - targets: [localhost]
+`
+	cfg, err := ParseConfig([]byte(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range cfg.Jobs {
+		if job.HonorTimestamps == nil || !*job.HonorTimestamps {
+			t.Fatalf("honor_timestamps was not inherited or overridden: %+v", job)
+		}
+	}
+	if _, err := ParseConfig([]byte(strings.Replace(base, "  honor_timestamps: true\n  static_configs:",
+		"  honor_timestamps: false\n  static_configs:", 1))); err == nil {
+		t.Fatal("job honor_timestamps=false must remain unsupported")
 	}
 }
 

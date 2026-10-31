@@ -51,10 +51,16 @@ type Timing struct {
 }
 
 type Config struct {
-	Global   Timing          `yaml:"global"`
+	Global   GlobalConfig    `yaml:"global"`
 	Jobs     []Job           `yaml:"scrape_configs"`
 	EventHub *EventHubConfig `yaml:"event_hub"`
 	Cluster  *ClusterConfig  `yaml:"cluster"`
+}
+
+type GlobalConfig struct {
+	Timing          `yaml:",inline"`
+	HonorTimestamps *bool         `yaml:"honor_timestamps"`
+	RollingRange    *RollingRange `yaml:"rolling_range"`
 }
 
 type EventHubConfig struct {
@@ -78,9 +84,59 @@ type Job struct {
 }
 
 type RollingRange struct {
-	Window Duration            `yaml:"window"`
-	Step   Duration            `yaml:"step"`
-	Delay  NonNegativeDuration `yaml:"delay"`
+	Enabled  *bool               `yaml:"enabled"`
+	Window   Duration            `yaml:"window"`
+	Step     Duration            `yaml:"step"`
+	Delay    NonNegativeDuration `yaml:"delay"`
+	delaySet bool
+}
+
+func (r *RollingRange) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var raw struct {
+		Enabled *bool                `yaml:"enabled"`
+		Window  Duration             `yaml:"window"`
+		Step    Duration             `yaml:"step"`
+		Delay   *NonNegativeDuration `yaml:"delay"`
+	}
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+	*r = RollingRange{Enabled: raw.Enabled, Window: raw.Window, Step: raw.Step, delaySet: raw.Delay != nil}
+	if raw.Delay != nil {
+		r.Delay = *raw.Delay
+	}
+	return nil
+}
+
+func (r RollingRange) withDefaults(defaults *RollingRange) RollingRange {
+	if defaults == nil {
+		defaults = &RollingRange{Window: Duration(time.Minute), Step: Duration(15 * time.Second)}
+	}
+	if r.Enabled == nil {
+		r.Enabled = defaults.Enabled
+	}
+	if r.Window == 0 {
+		r.Window = defaults.Window
+	}
+	if r.Step == 0 {
+		r.Step = defaults.Step
+	}
+	if !r.delaySet && r.Delay == 0 {
+		r.Delay = defaults.Delay
+	}
+	return r
+}
+
+func (r RollingRange) validate() error {
+	if time.Duration(r.Window)%time.Millisecond != 0 ||
+		time.Duration(r.Step)%time.Millisecond != 0 ||
+		time.Duration(r.Delay)%time.Millisecond != 0 {
+		return fmt.Errorf("rolling_range durations must use whole milliseconds")
+	}
+	if r.Step > r.Window {
+		return fmt.Errorf("rolling_range.step must not exceed window")
+	}
+	return nil
 }
 
 type StaticConfig struct {
@@ -122,6 +178,16 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if cfg.Global.Timeout > cfg.Global.Interval {
 		return nil, fmt.Errorf("global scrape_timeout must not exceed scrape_interval")
+	}
+	if cfg.Global.HonorTimestamps != nil && !*cfg.Global.HonorTimestamps {
+		return nil, fmt.Errorf("global honor_timestamps=false is unsupported; source timestamps are always preserved")
+	}
+	if cfg.Global.RollingRange != nil {
+		rolling := cfg.Global.RollingRange.withDefaults(nil)
+		if err := rolling.validate(); err != nil {
+			return nil, fmt.Errorf("global: %w", err)
+		}
+		cfg.Global.RollingRange = &rolling
 	}
 	if len(cfg.Jobs) == 0 {
 		return nil, fmt.Errorf("scrape_configs must contain at least one job")
@@ -181,6 +247,24 @@ func ParseConfig(data []byte) (*Config, error) {
 				return nil, fmt.Errorf("job %q: metric_name requires /probe/metrics/promql, format=json and exactly one query", job.Name)
 			}
 		}
+		if job.HonorTimestamps == nil {
+			job.HonorTimestamps = cfg.Global.HonorTimestamps
+		}
+		if job.RollingRange != nil || cfg.Global.RollingRange != nil {
+			rolling := RollingRange{}
+			if job.RollingRange != nil {
+				rolling = *job.RollingRange
+			}
+			rolling = rolling.withDefaults(cfg.Global.RollingRange)
+			if err := rolling.validate(); err != nil {
+				return nil, fmt.Errorf("job %q: %w", job.Name, err)
+			}
+			if rolling.Enabled != nil && !*rolling.Enabled {
+				job.RollingRange = nil
+			} else {
+				job.RollingRange = &rolling
+			}
+		}
 		if job.RollingRange != nil {
 			if job.MetricsPath != config.ProbeMetricsPromQLUrl ||
 				len(job.Params["query"]) != 1 || job.Params["query"][0] == "" {
@@ -190,21 +274,6 @@ func ParseConfig(data []byte) (*Config, error) {
 				if _, exists := job.Params[key]; exists {
 					return nil, fmt.Errorf("job %q: rolling_range cannot be combined with params.%s", job.Name, key)
 				}
-			}
-			rolling := job.RollingRange
-			if rolling.Window == 0 {
-				rolling.Window = Duration(time.Minute)
-			}
-			if rolling.Step == 0 {
-				rolling.Step = Duration(15 * time.Second)
-			}
-			if time.Duration(rolling.Window)%time.Millisecond != 0 ||
-				time.Duration(rolling.Step)%time.Millisecond != 0 ||
-				time.Duration(rolling.Delay)%time.Millisecond != 0 {
-				return nil, fmt.Errorf("job %q: rolling_range durations must use whole milliseconds", job.Name)
-			}
-			if rolling.Step > rolling.Window {
-				return nil, fmt.Errorf("job %q: rolling_range.step must not exceed window", job.Name)
 			}
 		}
 		if cfg.EventHub != nil {

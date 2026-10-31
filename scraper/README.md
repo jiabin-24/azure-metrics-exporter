@@ -59,6 +59,8 @@ Invoke-WebRequest "http://127.0.0.1:8081/readyz"
 |--------|------|
 | `scrape_interval` | 抓取周期，默认 `1m`，可在 job 中覆盖 |
 | `scrape_timeout` | 抓取超时，不得大于抓取周期 |
+| `honor_timestamps` | 可在 `global` 设置、job 覆盖；始终保留源时间戳，不支持 `false` |
+| `rolling_range` | 可在 `global` 设置，job 按字段覆盖；`enabled: false` 关闭滚动查询 |
 | `targets` | exporter 的 `host:port`；HTTPS 另设 `scheme: https` |
 | `metric_name` | 可选，指定单条 PromQL JSON 查询的输出指标名 |
 | `params.query` | PromQL 表达式，每个任务一条 |
@@ -71,14 +73,17 @@ Invoke-WebRequest "http://127.0.0.1:8081/readyz"
 每个任务自动采集全部已配置的 workspace，不要填写 `workspaces` 或 `params.workspace`。
 
 ```yaml
+global:
+  honor_timestamps: true
+  rolling_range:
+    window: 1m
+    step: 15s
+    delay: 0s
+
 scrape_configs:
   - job_name: apiserver_request_rate_by_code
     metric_name: apiserver_request_rate_by_code
     metrics_path: /probe/metrics/promql
-    rolling_range:
-      window: 1m
-      step: 15s
-      delay: 0s
     params:
       query: ['sum(rate(apiserver_request_total[5m])) by (cluster, code)']
       format: ["json"]
@@ -90,11 +95,14 @@ scrape_configs:
 
 ### PromQL 滚动查询范围
 
+`global.rolling_range` 为所有 job 提供默认值；job 的 `rolling_range` 按字段覆盖，未填写的字段继承全局值。例如 job 只配置 `rolling_range: {delay: 20m}` 时，`window` 和 `step` 继续继承；显式设置 `delay: 0s` 可清除全局延迟。未在全局或 job 配置 `rolling_range` 时，保持原有查询行为。
+
+- `enabled`：默认启用；job 设置 `rolling_range: {enabled: false}` 可关闭继承的滚动范围。全局关闭后，job 可设置 `enabled: true` 重新启用。
 - `window`：查询窗口，默认 `1m`。
 - `step`：查询步长，默认 `15s`，起止时间按此对齐。
 - `delay`：入库延迟，默认 `0s`，可按需要设置为 `20m` 等。
 
-不要与 `params.start/end/step/time/query_delay` 同时使用。改用即时查询时移除 `rolling_range`，按需设置 `params.query_delay`。更多参数见 [PromQL 文档](../PROMQL.md)。
+启用滚动范围时，不要与 `params.start/end/step/time/query_delay` 同时使用。改用即时查询或固定范围时，在 job 设置 `rolling_range: {enabled: false}`，再按需设置查询参数。滚动范围仅适用于 `/probe/metrics/promql` 的单条查询；其他端点的 job 也需关闭继承的滚动范围。更多参数见 [PromQL 文档](../PROMQL.md)。
 
 ### 平台指标 JSON 采集
 

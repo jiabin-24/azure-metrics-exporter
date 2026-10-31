@@ -75,6 +75,112 @@ func TestRollingRangeCustomWindowDelayAndStep(t *testing.T) {
 	}
 }
 
+func TestRollingRangeGlobalInheritanceAndOverrides(t *testing.T) {
+	const global = "global:\n  rolling_range: {window: 3m, step: 30s, delay: 20m}\n"
+	tests := []struct {
+		name   string
+		job    string
+		window time.Duration
+		step   time.Duration
+		delay  time.Duration
+	}{
+		{"omitted", "", 3 * time.Minute, 30 * time.Second, 20 * time.Minute},
+		{"empty", "  rolling_range: {}\n", 3 * time.Minute, 30 * time.Second, 20 * time.Minute},
+		{"window", "  rolling_range: {window: 5m}\n", 5 * time.Minute, 30 * time.Second, 20 * time.Minute},
+		{"step", "  rolling_range: {step: 15s}\n", 3 * time.Minute, 15 * time.Second, 20 * time.Minute},
+		{"delay", "  rolling_range: {delay: 5m}\n", 3 * time.Minute, 30 * time.Second, 5 * time.Minute},
+		{"zero delay", "  rolling_range: {delay: 0s}\n", 3 * time.Minute, 30 * time.Second, 0},
+		{"all", "  rolling_range: {window: 1m, step: 15s, delay: 0s}\n", time.Minute, 15 * time.Second, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := global + strings.Replace(rollingConfig, "  rolling_range: {}\n", tt.job, 1)
+			input += strings.Replace(strings.TrimPrefix(rollingConfig, "\nscrape_configs:\n"),
+				"job_name: rolling", "job_name: sibling", 1)
+			cfg, err := ParseConfig([]byte(input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rolling := cfg.Jobs[0].RollingRange
+			if rolling == nil || rolling.Window != Duration(tt.window) || rolling.Step != Duration(tt.step) ||
+				rolling.Delay != NonNegativeDuration(tt.delay) {
+				t.Fatalf("incorrect effective rolling range: %+v", rolling)
+			}
+			for _, other := range []*RollingRange{cfg.Global.RollingRange, cfg.Jobs[1].RollingRange} {
+				if other.Window != Duration(3*time.Minute) || other.Step != Duration(30*time.Second) ||
+					other.Delay != NonNegativeDuration(20*time.Minute) || other == rolling {
+					t.Fatalf("job override changed global or sibling range: %+v", other)
+				}
+			}
+			now := time.Unix(3600, 0)
+			params := cfg.Jobs[0].paramsAt(now)
+			end := previousStep(now.Add(-tt.delay), tt.step)
+			if params["start"][0] != end.Add(-tt.window).Format(time.RFC3339Nano) ||
+				params["end"][0] != end.Format(time.RFC3339Nano) || params["step"][0] != tt.step.String() {
+				t.Fatalf("effective range not used in query: %v", params)
+			}
+		})
+	}
+}
+
+func TestRollingRangeGlobalDefaultsAndValidation(t *testing.T) {
+	input := "global:\n  rolling_range: {}\n" + strings.Replace(rollingConfig, "  rolling_range: {}\n", "", 1)
+	cfg, err := ParseConfig([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rolling := range []*RollingRange{cfg.Global.RollingRange, cfg.Jobs[0].RollingRange} {
+		if rolling == nil || rolling.Window != Duration(time.Minute) ||
+			rolling.Step != Duration(15*time.Second) || rolling.Delay != 0 {
+			t.Fatalf("incorrect global rolling defaults: %+v", rolling)
+		}
+	}
+	for _, overrides := range []string{"{window: 5s}", "{step: 2m}"} {
+		input := "global:\n  rolling_range: {}\n" +
+			strings.Replace(rollingConfig, "rolling_range: {}", "rolling_range: "+overrides, 1)
+		if _, err := ParseConfig([]byte(input)); err == nil || !strings.Contains(err.Error(), "step must not exceed window") {
+			t.Fatalf("invalid merged range accepted: %v", err)
+		}
+	}
+	input = strings.Replace(input, "/probe/metrics/promql", "/metrics", 1)
+	if _, err := ParseConfig([]byte(input)); err == nil || !strings.Contains(err.Error(), "rolling_range requires") {
+		t.Fatalf("inherited range accepted on unsupported endpoint: %v", err)
+	}
+}
+
+func TestRollingRangeDisabled(t *testing.T) {
+	for _, global := range []string{"", "global:\n  rolling_range: {delay: 20m}\n"} {
+		for _, path := range []string{"/probe/metrics/promql", "/probe/metrics/resource", "/metrics"} {
+			input := strings.Replace(rollingConfig, "rolling_range: {}", "rolling_range: {enabled: false}", 1)
+			input = strings.Replace(input, "/probe/metrics/promql", path, 1)
+			input = strings.Replace(input, "format: [json]", "format: [json]\n    query_delay: [20m]", 1)
+			cfg, err := ParseConfig([]byte(global + input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := cfg.Jobs[0]
+			if job.RollingRange != nil || !reflect.DeepEqual(job.paramsAt(time.Now()), job.Params) {
+				t.Fatalf("disabled rolling range changed parameters: %+v", job)
+			}
+		}
+	}
+	input := "global:\n  rolling_range: {enabled: false, delay: 20m}\n" + rollingConfig
+	cfg, err := ParseConfig([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Jobs[0].RollingRange != nil {
+		t.Fatal("global enabled=false was not inherited")
+	}
+	cfg, err = ParseConfig([]byte(strings.Replace(input, "  rolling_range: {}", "  rolling_range: {enabled: true}", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Jobs[0].RollingRange == nil || cfg.Jobs[0].RollingRange.Delay != NonNegativeDuration(20*time.Minute) {
+		t.Fatal("job could not re-enable the global range")
+	}
+}
+
 func TestPreviousStep(t *testing.T) {
 	tests := []struct {
 		name string
@@ -172,6 +278,11 @@ func TestRollingRangeRejectsInvalidConfiguration(t *testing.T) {
 			if _, err := ParseConfig([]byte(input)); err == nil {
 				t.Fatal("invalid rolling range was accepted")
 			}
+			input = "global:\n  rolling_range: " + rolling + "\n" +
+				strings.Replace(rollingConfig, "  rolling_range: {}\n", "", 1)
+			if _, err := ParseConfig([]byte(input)); err == nil {
+				t.Fatal("invalid global rolling range was accepted")
+			}
 		})
 	}
 	for _, key := range []string{"start", "end", "step", "time", "query_delay"} {
@@ -180,6 +291,10 @@ func TestRollingRangeRejectsInvalidConfiguration(t *testing.T) {
 				input := strings.Replace(rollingConfig, "format: [json]", "format: [json]\n    "+key+": "+value, 1)
 				if _, err := ParseConfig([]byte(input)); err == nil || !strings.Contains(err.Error(), "params."+key) {
 					t.Fatalf("conflicting parameter was accepted: %v", err)
+				}
+				input = "global:\n  rolling_range: {}\n" + strings.Replace(input, "  rolling_range: {}\n", "", 1)
+				if _, err := ParseConfig([]byte(input)); err == nil || !strings.Contains(err.Error(), "params."+key) {
+					t.Fatalf("conflicting parameter with inherited range was accepted: %v", err)
 				}
 			}
 		})
