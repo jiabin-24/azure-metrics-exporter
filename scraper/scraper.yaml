@@ -1,7 +1,7 @@
 global:
   scrape_interval: 1m
   scrape_timeout: 30s
-  honor_timestamps: true
+  honor_timestamps: false
   # 起止时间按 step 对齐；end 严格早于当前时间-delay，start 为 end-window 向下对齐。
   # job 可按字段覆盖；即时查询或平台指标 job 设置 rolling_range: {enabled: false}。
   rolling_range:
