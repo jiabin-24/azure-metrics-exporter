@@ -133,7 +133,8 @@ func TestScrapeRejectsInvalidPlatformJSON(t *testing.T) {
 func TestScrapePromQLWindowUsesSameJSONFormat(t *testing.T) {
 	const payload = `{"schemaVersion":"1.0","source":"azure-prometheus","metrics":[{"name":"azure_promql_query_result","labels":{"cluster":"prod","microsoft.resourceid":"/resources/example"},"samples":[["2026-10-21T14:00:00Z",1],["2026-10-21T14:00:15Z",2]]}]}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("format") != "json" || r.Header.Get("Accept") != "application/json" {
+		if r.URL.Query().Get("format") != "json" || r.Header.Get("Accept") != "application/json" ||
+			r.URL.Query().Get("honor_timestamps") != "false" {
 			t.Errorf("incorrect PromQL JSON request: %s", r.URL)
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -142,6 +143,9 @@ func TestScrapePromQLWindowUsesSameJSONFormat(t *testing.T) {
 	defer server.Close()
 	target := strings.TrimPrefix(server.URL, "http://")
 	job := testJob(target)
+	honorTimestamps := false
+	job.HonorTimestamps = &honorTimestamps
+	job.MetricsPath = "/probe/metrics/promql"
 	job.Params = map[string][]string{"query": {"sum(rate(up[5m]))"}, "format": {"json"}}
 	var got Batch
 	s := New(&Config{}, quietLogger(), func(_ context.Context, batch Batch) error { got = batch; return nil })

@@ -16,7 +16,6 @@ scrape_configs:
   - job_name: promql
     scrape_interval: 5s
     metrics_path: /probe/metrics/promql
-    honor_timestamps: true
     params:
       query: ['sum(rate(requests_total{cluster="prod"}[5m]))', 'up']
       query_delay: ["20m"]
@@ -53,28 +52,26 @@ scrape_configs:
 func TestConfigRejectsInvalidInput(t *testing.T) {
 	base := "scrape_configs:\n  - job_name: test\n    static_configs:\n      - targets: ['exporter:8080']\n"
 	tests := map[string]string{
-		"empty":                    "",
-		"unknown field":            base + "    relabel_configs: []\n",
-		"duplicate key":            base + "    job_name: other\n",
-		"zero interval":            base + "    scrape_interval: 0s\n",
-		"negative timeout":         base + "    scrape_timeout: -1s\n",
-		"invalid duration":         base + "    scrape_interval: 1d\n",
-		"timeout too long":         base + "    scrape_interval: 1s\n    scrape_timeout: 2s\n",
-		"invalid scheme":           base + "    scheme: ftp\n",
-		"relative path":            base + "    metrics_path: metrics\n",
-		"path query":               base + "    metrics_path: /metrics?query=up\n",
-		"timestamp rewrite":        base + "    honor_timestamps: false\n",
-		"global timestamp rewrite": "global:\n  honor_timestamps: false\n" + base,
-		"global timing":            "global:\n  scrape_interval: 1s\n  scrape_timeout: 2s\n" + base,
-		"duplicate jobs":           base + strings.TrimPrefix(base, "scrape_configs:\n"),
-		"missing name":             strings.Replace(base, "job_name: test", "job_name: ''", 1),
-		"no targets":               strings.Replace(base, "['exporter:8080']", "[]", 1),
-		"full URL target":          strings.Replace(base, "exporter:8080", "http://exporter:8080", 1),
-		"target path":              strings.Replace(base, "exporter:8080", "exporter:8080/metrics", 1),
-		"target port":              strings.Replace(base, "exporter:8080", "exporter:99999", 1),
-		"target auth":              strings.Replace(base, "exporter:8080", "user:pass@exporter:8080", 1),
-		"duplicate target":         strings.Replace(base, "['exporter:8080']", "['exporter:8080', 'exporter:8080']", 1),
-		"invalid label":            base + "        labels: {'bad-label': prod}\n",
+		"empty":            "",
+		"unknown field":    base + "    relabel_configs: []\n",
+		"duplicate key":    base + "    job_name: other\n",
+		"zero interval":    base + "    scrape_interval: 0s\n",
+		"negative timeout": base + "    scrape_timeout: -1s\n",
+		"invalid duration": base + "    scrape_interval: 1d\n",
+		"timeout too long": base + "    scrape_interval: 1s\n    scrape_timeout: 2s\n",
+		"invalid scheme":   base + "    scheme: ftp\n",
+		"relative path":    base + "    metrics_path: metrics\n",
+		"path query":       base + "    metrics_path: /metrics?query=up\n",
+		"global timing":    "global:\n  scrape_interval: 1s\n  scrape_timeout: 2s\n" + base,
+		"duplicate jobs":   base + strings.TrimPrefix(base, "scrape_configs:\n"),
+		"missing name":     strings.Replace(base, "job_name: test", "job_name: ''", 1),
+		"no targets":       strings.Replace(base, "['exporter:8080']", "[]", 1),
+		"full URL target":  strings.Replace(base, "exporter:8080", "http://exporter:8080", 1),
+		"target path":      strings.Replace(base, "exporter:8080", "exporter:8080/metrics", 1),
+		"target port":      strings.Replace(base, "exporter:8080", "exporter:99999", 1),
+		"target auth":      strings.Replace(base, "exporter:8080", "user:pass@exporter:8080", 1),
+		"duplicate target": strings.Replace(base, "['exporter:8080']", "['exporter:8080', 'exporter:8080']", 1),
+		"invalid label":    base + "        labels: {'bad-label': prod}\n",
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -85,31 +82,48 @@ func TestConfigRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestConfigGlobalHonorTimestamps(t *testing.T) {
-	const base = `
-global:
-  honor_timestamps: true
-scrape_configs:
-- job_name: inherited
-  static_configs:
-  - targets: [localhost]
-- job_name: overridden
-  honor_timestamps: true
-  static_configs:
-  - targets: [localhost]
-`
-	cfg, err := ParseConfig([]byte(base))
-	if err != nil {
-		t.Fatal(err)
+func TestConfigHonorTimestamps(t *testing.T) {
+	const base = "scrape_configs:\n  - job_name: test\n    metrics_path: /probe/metrics/promql\n    static_configs:\n      - targets: [localhost]\n"
+	tests := []struct {
+		name, input string
+		want        bool
+	}{
+		{"default", base, true},
+		{"global true", "global:\n  honor_timestamps: true\n" + base, true},
+		{"global false", "global:\n  honor_timestamps: false\n" + base, false},
+		{"job false", base + "    honor_timestamps: false\n", false},
+		{"job true overrides", "global:\n  honor_timestamps: false\n" + base + "    honor_timestamps: true\n", true},
+		{"job false overrides", "global:\n  honor_timestamps: true\n" + base + "    honor_timestamps: false\n", false},
 	}
-	for _, job := range cfg.Jobs {
-		if job.HonorTimestamps == nil || !*job.HonorTimestamps {
-			t.Fatalf("honor_timestamps was not inherited or overridden: %+v", job)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, err := ParseConfig([]byte(test.input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := cfg.Jobs[0]
+			u, err := url.Parse(job.targetURL("localhost"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.HonorTimestamps == nil || *job.HonorTimestamps != test.want ||
+				u.Query().Get("honor_timestamps") != map[bool]string{true: "true", false: "false"}[test.want] {
+				t.Fatalf("timestamp policy not inherited or forwarded: %+v %s", job, u)
+			}
+			if _, exists := job.Params["honor_timestamps"]; exists {
+				t.Fatal("targetURL mutated job params")
+			}
+		})
+	}
+	for _, input := range []string{
+		base + "    honor_timestamps: invalid\n",
+		base + "    params:\n      honor_timestamps: [false]\n",
+		strings.Replace(base, "/probe/metrics/promql", "/probe/metrics/list", 1) + "    honor_timestamps: false\n",
+		"global:\n  honor_timestamps: false\n" + strings.Replace(base, "/probe/metrics/promql", "/metrics", 1),
+	} {
+		if _, err := ParseConfig([]byte(input)); err == nil {
+			t.Fatalf("expected invalid timestamp policy error: %s", input)
 		}
-	}
-	if _, err := ParseConfig([]byte(strings.Replace(base, "  honor_timestamps: true\n  static_configs:",
-		"  honor_timestamps: false\n  static_configs:", 1))); err == nil {
-		t.Fatal("job honor_timestamps=false must remain unsupported")
 	}
 }
 

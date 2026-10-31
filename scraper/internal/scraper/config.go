@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/webdevops/azure-metrics-exporter/config"
@@ -70,6 +71,7 @@ type EventHubConfig struct {
 }
 
 type Job struct {
+	HonorTimestamps *bool               `yaml:"honor_timestamps"`
 	Name            string              `yaml:"job_name"`
 	MetricName      string              `yaml:"metric_name"`
 	Interval        Duration            `yaml:"scrape_interval"`
@@ -77,7 +79,6 @@ type Job struct {
 	Scheme          string              `yaml:"scheme"`
 	MetricsPath     string              `yaml:"metrics_path"`
 	Params          map[string][]string `yaml:"params"`
-	HonorTimestamps *bool               `yaml:"honor_timestamps"`
 	StaticConfigs   []StaticConfig      `yaml:"static_configs"`
 	RollingRange    *RollingRange       `yaml:"rolling_range"`
 	workspaces      []string
@@ -179,8 +180,9 @@ func ParseConfig(data []byte) (*Config, error) {
 	if cfg.Global.Timeout > cfg.Global.Interval {
 		return nil, fmt.Errorf("global scrape_timeout must not exceed scrape_interval")
 	}
-	if cfg.Global.HonorTimestamps != nil && !*cfg.Global.HonorTimestamps {
-		return nil, fmt.Errorf("global honor_timestamps=false is unsupported; source timestamps are always preserved")
+	if cfg.Global.HonorTimestamps == nil {
+		enabled := true
+		cfg.Global.HonorTimestamps = &enabled
 	}
 	if cfg.Global.RollingRange != nil {
 		rolling := cfg.Global.RollingRange.withDefaults(nil)
@@ -237,6 +239,15 @@ func ParseConfig(data []byte) (*Config, error) {
 		if _, exists := job.Params["workspace"]; exists {
 			return nil, fmt.Errorf("job %q: params.workspace is unsupported; all workspaces are discovered automatically", job.Name)
 		}
+		if _, exists := job.Params["honor_timestamps"]; exists {
+			return nil, fmt.Errorf("job %q: use global or job honor_timestamps, not params.honor_timestamps", job.Name)
+		}
+		if job.HonorTimestamps == nil {
+			job.HonorTimestamps = cfg.Global.HonorTimestamps
+		}
+		if !*job.HonorTimestamps && job.MetricsPath != config.ProbeMetricsPromQLUrl {
+			return nil, fmt.Errorf("job %q: honor_timestamps=false requires /probe/metrics/promql", job.Name)
+		}
 		if job.MetricName != "" {
 			if !metricName.MatchString(job.MetricName) {
 				return nil, fmt.Errorf("job %q: invalid metric_name %q", job.Name, job.MetricName)
@@ -246,9 +257,6 @@ func ParseConfig(data []byte) (*Config, error) {
 				len(job.Params["query"]) != 1 || job.Params["query"][0] == "" {
 				return nil, fmt.Errorf("job %q: metric_name requires /probe/metrics/promql, format=json and exactly one query", job.Name)
 			}
-		}
-		if job.HonorTimestamps == nil {
-			job.HonorTimestamps = cfg.Global.HonorTimestamps
 		}
 		if job.RollingRange != nil || cfg.Global.RollingRange != nil {
 			rolling := RollingRange{}
@@ -290,9 +298,6 @@ func ParseConfig(data []byte) (*Config, error) {
 			path.RawQuery != "" || path.Fragment != "" || job.MetricsPath[0] != '/' {
 			return nil, fmt.Errorf("job %q: metrics_path must be an absolute path without query or fragment", job.Name)
 		}
-		if job.HonorTimestamps != nil && !*job.HonorTimestamps {
-			return nil, fmt.Errorf("job %q: honor_timestamps=false is unsupported; source timestamps are always preserved", job.Name)
-		}
 		targets := make(map[string]bool)
 		for _, group := range job.StaticConfigs {
 			if len(group.Targets) == 0 {
@@ -330,7 +335,14 @@ func (j Job) targetURL(target string) string {
 	// Parse the path so existing percent-escapes are not escaped a second time.
 	path, _ := url.Parse(j.MetricsPath)
 	u.Path, u.RawPath = path.Path, path.RawPath
-	u.RawQuery = url.Values(j.Params).Encode()
+	params := url.Values(maps.Clone(j.Params))
+	if j.MetricsPath == config.ProbeMetricsPromQLUrl && j.HonorTimestamps != nil {
+		if params == nil {
+			params = make(url.Values)
+		}
+		params.Set("honor_timestamps", strconv.FormatBool(*j.HonorTimestamps))
+	}
+	u.RawQuery = params.Encode()
 	return u.String()
 }
 

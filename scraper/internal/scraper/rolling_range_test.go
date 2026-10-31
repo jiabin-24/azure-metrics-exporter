@@ -55,7 +55,7 @@ func TestRollingRangeDefaultsAndExactBounds(t *testing.T) {
 }
 
 func TestRollingRangeCustomWindowDelayAndStep(t *testing.T) {
-	cfg, err := ParseConfig([]byte(strings.Replace(rollingConfig, "rolling_range: {}",
+	cfg, err := ParseConfig([]byte("global:\n  honor_timestamps: false\n" + strings.Replace(rollingConfig, "rolling_range: {}",
 		"rolling_range:\n    window: 3m\n    step: 30s\n    delay: 20m", 1)))
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +70,15 @@ func TestRollingRangeCustomWindowDelayAndStep(t *testing.T) {
 	copy := job
 	copy.Params = params
 	u, err := url.Parse(copy.targetURL("localhost:8080"))
-	if err != nil || !reflect.DeepEqual(map[string][]string(u.Query()), params) {
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := u.Query()
+	if query.Get("honor_timestamps") != "false" {
+		t.Fatalf("timestamp policy not forwarded with delayed range: %s", u)
+	}
+	query.Del("honor_timestamps")
+	if !reflect.DeepEqual(map[string][]string(query), params) {
 		t.Fatalf("dynamic parameters did not survive URL encoding: %v, %v", u, err)
 	}
 }

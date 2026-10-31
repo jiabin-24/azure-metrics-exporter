@@ -59,7 +59,7 @@ Invoke-WebRequest "http://127.0.0.1:8081/readyz"
 |--------|------|
 | `scrape_interval` | 抓取周期，默认 `1m`，可在 job 中覆盖 |
 | `scrape_timeout` | 抓取超时，不得大于抓取周期 |
-| `honor_timestamps` | 可在 `global` 设置、job 覆盖；始终保留源时间戳，不支持 `false` |
+| `honor_timestamps` | 默认 `true`；可在 `global` 设置、job 覆盖；`false` 仅用于 PromQL，保留上游查询求值时间 |
 | `rolling_range` | 可在 `global` 设置，job 按字段覆盖；`enabled: false` 关闭滚动查询 |
 | `targets` | exporter 的 `host:port`；HTTPS 另设 `scheme: https` |
 | `metric_name` | 可选，指定单条 PromQL JSON 查询的输出指标名 |
@@ -67,6 +67,16 @@ Invoke-WebRequest "http://127.0.0.1:8081/readyz"
 | `params.format` | 发送到 Event Hub 时使用 `["json"]` |
 | `event_hub.batch_window` | 单实例跨 job 汇聚等待窗口，默认 `5s`，必须为正时长 |
 | `static_configs.labels` | 静态元数据，例如 `cluster`、`region` |
+
+### 时间戳语义
+
+scraper 始终保留 exporter 返回的指标时间戳，不替换为 scraper 的本次抓取时间。`honor_timestamps: true`（默认）保持现有逻辑：PromQL 独立原始指标选择器使用源样本时间，计算表达式使用查询求值时间；平台指标使用 Azure 聚合时间桶的时间。
+
+范围查询的一次响应包含多个历史点，若全部改成本次抓取时间，会丢失各点的时间关系。`rolling_range.step` 只对齐查询求值网格，不保证源样本时间对齐。
+
+`honor_timestamps: false` 让 PromQL exporter 不再用源时间替换上游响应的时间戳。普通范围查询的每个点保留自身求值时间；滚动查询配置 `step: 15s` 时落在每分钟 `00/15/30/45`，`delay` 在确定查询范围时生效。缺失点不补齐，不按点数倒推，不插值；重复值仍可出现在不同求值时刻。即时查询使用实际求值时间（含 `time` 或 `query_delay`），不自动对齐到 step。即时查询返回的原始范围向量仍携带原始样本时间，见 [PromQL 文档](../PROMQL.md#采样时间默认启用)。
+
+这个选项不同于标准 Prometheus 的同名配置：`false` 不是将历史点统一打上本次抓取时间。请在 `global` 或 job 中设置，不要填写 `params.honor_timestamps`。非 PromQL job 不支持 `false`；全局设为 `false` 时，这些 job 必须覆盖为 `true`。Event Hub 的 `windowStart/windowEnd` 仍表示实际返回样本的最早/最晚时间，不保证等于请求边界。
 
 ### PromQL JSON 采集
 

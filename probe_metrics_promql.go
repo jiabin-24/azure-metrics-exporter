@@ -185,6 +185,13 @@ func collectPromQLMetrics(
 		return "", http.StatusBadRequest, err
 	}
 	allPoints := format == "json"
+	honorTimestamps := true
+	if values, exists := params["honor_timestamps"]; exists {
+		if len(values) != 1 || (values[0] != "true" && values[0] != "false") {
+			return "", http.StatusBadRequest, errors.New(`query parameter "honor_timestamps" requires exactly one value: true or false`)
+		}
+		honorTimestamps = values[0] == "true"
+	}
 	queryParams, err := preparePromQLQueryParams(params, time.Now().UTC())
 	if err != nil {
 		return "", http.StatusBadRequest, err
@@ -205,7 +212,7 @@ func collectPromQLMetrics(
 	query := strings.TrimSpace(params.Get("query"))
 	isSelector := prometheusMetricNamePattern.MatchString(query) ||
 		promQLStandaloneSelector.MatchString(query) || promQLNamedSelector.MatchString(query)
-	if isSelector && len(samples) > 0 {
+	if honorTimestamps && isSelector && len(samples) > 0 {
 		selectors, err := promQLMetricListSelectors(query)
 		if err != nil {
 			return "", http.StatusBadRequest, err
@@ -278,6 +285,7 @@ func preparePromQLQueryParams(params url.Values, now time.Time) (url.Values, err
 	}
 	queryParams.Del("format")
 	queryParams.Del("workspace")
+	queryParams.Del("honor_timestamps")
 	rangeQuery := params.Has("start") || params.Has("end") || params.Has("step")
 	if params.Has("query_delay") {
 		if params.Has("time") || rangeQuery {
