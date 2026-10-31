@@ -93,6 +93,17 @@ scrape_configs:
 
 其他任务使用 `targets: *exporter_targets` 复用地址。输出缺少 `cluster` 时，须在静态 `labels` 中补充；也可填写 `region`。
 
+自定义静态标签示例（可选，不包含在默认配置中）：
+
+```yaml
+static_configs:
+  - targets: ["127.0.0.1:8080"]
+    labels:
+      environment: development
+```
+
+`environment` 仅保存在采集批次元数据中，不会自动添加到指标标签或最终 Event Hub 消息，也不会切换运行环境。当前导出逻辑仅使用静态标签中的 `cluster`、`region`、`location` 补充导出信息。
+
 ### PromQL 滚动查询范围
 
 `global.rolling_range` 为所有 job 提供默认值；job 的 `rolling_range` 按字段覆盖，未填写的字段继承全局值。例如 job 只配置 `rolling_range: {delay: 20m}` 时，`window` 和 `step` 继续继承；显式设置 `delay: 0s` 可清除全局延迟。未在全局或 job 配置 `rolling_range` 时，保持原有查询行为。

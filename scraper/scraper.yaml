@@ -33,8 +33,6 @@ scrape_configs:
       # query_delay: ["20m"]
     static_configs:
       - targets: &exporter_targets ["azure-metrics:8080"]
-        labels:
-          environment: development
 
   - job_name: apiserver_request_rate_by_verb
     metric_name: apiserver_request_rate_by_verb
@@ -44,8 +42,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: apiserver_error_rate_5xx
     metric_name: apiserver_error_rate_5xx
@@ -55,8 +51,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: apiserver_error_ratio_pct
     metric_name: apiserver_error_ratio_pct
@@ -66,8 +60,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: apiserver_request_latency_p99
     metric_name: apiserver_request_latency_p99
@@ -77,8 +69,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: apiserver_request_latency_p50
     metric_name: apiserver_request_latency_p50
@@ -88,8 +78,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: apiserver_inflight_requests
     metric_name: apiserver_inflight_requests
@@ -99,8 +87,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: etcd_mvcc_db_total_size_in_bytes
     metric_name: etcd_mvcc_db_total_size_in_bytes
@@ -110,8 +96,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: etcd_mvcc_db_total_size_in_use_in_bytes
     metric_name: etcd_mvcc_db_total_size_in_use_in_bytes
@@ -121,8 +105,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: etcd_db_fragmentation_ratio
     metric_name: etcd_db_fragmentation_ratio
@@ -132,8 +114,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: etcd_server_has_leader
     metric_name: etcd_server_has_leader
@@ -143,8 +123,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: etcd_heartbeat_send_failures_rate
     metric_name: etcd_heartbeat_send_failures_rate
@@ -154,8 +132,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: etcd_slow_apply_rate
     metric_name: etcd_slow_apply_rate
@@ -165,8 +141,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: etcd_slow_read_indexes_rate
     metric_name: etcd_slow_read_indexes_rate
@@ -176,8 +150,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: etcd_grpc_sent_bytes_rate
     metric_name: etcd_grpc_sent_bytes_rate
@@ -187,8 +159,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: etcd_server_leader_changes_seen_total
     metric_name: etcd_server_leader_changes_seen_total
@@ -198,8 +168,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: etcd_server_proposals_failed_rate
     metric_name: etcd_server_proposals_failed_rate
@@ -209,8 +177,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   - job_name: up
     metric_name: up
@@ -220,8 +186,6 @@ scrape_configs:
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
-        labels:
-          environment: development
 
   # /metrics 文本任务仅适用于未配置 event_hub 的独立采集器。
   # - job_name: exporter-self
