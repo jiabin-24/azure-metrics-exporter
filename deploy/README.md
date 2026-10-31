@@ -19,7 +19,7 @@ Azure Monitor workspace <- exporter (azure-metrics:8080) <- scraper -> Azure Eve
 
 1. 在 [workspace 配置](../config/prometheus-workspaces.yaml) 中填写真实的 workspace Prometheus 查询终结点；可增加多个 workspace。此文件同时用于本地运行和 Kubernetes ConfigMap 生成，无需在部署清单中重复维护。
 2. 在唯一的[采集配置](../scraper/scraper.yaml)中确认 `event_hub.namespace`、`event_hub.name`、PromQL 查询及静态标签（例如将 `environment: development` 改为实际环境）。保持目标地址 `azure-metrics:8080` 与 Service 一致，并保留默认的 memberlist 配置。
-3. 默认镜像为 `niuai/azure-metrics-exporter:main` 和 `niuai/azure-metrics-scraper:main`，需先由镜像发布工作流推送。生产环境建议将两个镜像改为同一发布版本标签或固定 digest。
+3. 每次构建生成统一的 UTC 日期标签 `YYYYMMDD-HHmmss-<run_id>-<run_attempt>`，azcli 版本追加 `-azcli`，原有标签保留。部署前，将两个镜像的 `:main` 替换为实际日期标签或固定 digest，避免 `IfNotPresent` 复用旧镜像；删除 Pod 不会清除节点缓存。
 4. 如 Azure Monitor 存在入库延迟，调整 `rolling_range.delay`；抓取较慢时同时调整 `scrape_timeout` 和 exporter 的写超时，前者不得超过 `scrape_interval`。
 
 exporter 的 ConfigMap 直接挂载为 `/etc/azure-metrics-exporter/workspaces.yaml`，代码默认读取此路径，无需额外配置 env 或启动参数。需要其他路径时仍可通过 `AZURE_PROMETHEUS_WORKSPACES_FILE` 或 `--azure.prometheus.workspaces-file` 覆盖。

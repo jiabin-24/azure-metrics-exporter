@@ -10,6 +10,8 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.image_tag.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v6
 
@@ -24,6 +26,10 @@ jobs:
         with:
           version: latest
           args: --print-resources-usage
+
+      - name: Generate dated image tag
+        id: image_tag
+        run: echo "image_tag=$(date -u +'%Y%m%d-%H%M%S')-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
   build:
     name: "build ${{ matrix.Dockerfile }}:${{ matrix.target }}"
@@ -67,6 +73,12 @@ jobs:
         with:
           images: |
             ${{ matrix.image }}
+          tags: |
+            type=raw,value=${{ needs.lint.outputs.image_tag }},priority=1000
+            type=schedule
+            type=ref,event=branch
+            type=ref,event=tag
+            type=ref,event=pr
           labels: |
             io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.repository.default_branch }}/${{ matrix.readme }}
           flavor: |

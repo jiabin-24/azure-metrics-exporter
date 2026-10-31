@@ -147,7 +147,7 @@ cluster:
 
 ## Docker Compose
 
-镜像发布工作流会同时构建并推送 `niuai/azure-metrics-scraper`，支持 `linux/amd64` 和 `linux/arm64`，标签规则与 exporter 一致。发布后可使用 `niuai/azure-metrics-scraper:<tag>`。
+镜像发布工作流会同时构建并推送 `niuai/azure-metrics-scraper`，支持 `linux/amd64` 和 `linux/arm64`，标签规则与 exporter 一致。每次构建共用一个 UTC 日期标签 `YYYYMMDD-HHmmss-<run_id>-<run_attempt>`，避免重复构建覆盖；原有标签仍保留。发布后可使用 `niuai/azure-metrics-scraper:<tag>`，建议选择实际构建生成的日期标签或固定 digest，不要依赖节点缓存中的 `:main`。
 
 也可在本地构建镜像：
 
