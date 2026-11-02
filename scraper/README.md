@@ -94,13 +94,15 @@ scrape_configs:
     metric_name: apiserver_request_rate_by_code
     metrics_path: /probe/metrics/promql
     params:
-      query: ['sum(rate(apiserver_request_total[5m])) by (cluster, code)']
+      query: ['sum(rate(apiserver_request_total[5m])) by (cluster, code, "microsoft.resourceid", microsoft_resourceid, resourceID, region, location)']
       format: ["json"]
     static_configs:
       - targets: &exporter_targets ["127.0.0.1:8080"]
 ```
 
 其他任务使用 `targets: *exporter_targets` 复用地址。输出缺少 `cluster` 时，须在静态 `labels` 中补充；也可填写 `region`。
+
+聚合查询的 `by (...)` 须保留源资源 ID 和已有 `region` / `location`，否则聚合会丢弃这些标签，exporter 无法按资源查询真实区域。默认 API Server 查询兼容 `"microsoft.resourceid"`（带点的标签名须加双引号）、`microsoft_resourceid` 和 `resourceID`；缺失的标签不会生成值。错误比例分子、分母须使用相同分组。不同资源或区域会分别聚合；同 cluster 多资源时，序列数可能增加，不再混合计算。
 
 自定义静态标签示例（可选，不包含在默认配置中）：
 

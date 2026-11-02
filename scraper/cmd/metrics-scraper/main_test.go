@@ -41,6 +41,39 @@ func TestSharedScrapeConfig(t *testing.T) {
 	}
 }
 
+func TestAPIServerQueriesPreserveResourceAndRegion(t *testing.T) {
+	cfg, err := scraper.LoadConfig(filepath.Join("..", "..", "scraper.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]struct {
+		dimensions string
+		groups     int
+	}{
+		"apiserver_request_rate_by_code": {"cluster, code", 1},
+		"apiserver_request_rate_by_verb": {"cluster, verb", 1},
+		"apiserver_error_rate_5xx":       {"cluster", 1},
+		"apiserver_error_ratio_pct":      {"cluster", 2},
+		"apiserver_request_latency_p99":  {"cluster, le, verb", 1},
+		"apiserver_request_latency_p50":  {"cluster, le, verb", 1},
+		"apiserver_inflight_requests":    {"cluster, request_kind", 1},
+	}
+	for _, job := range cfg.Jobs {
+		want, ok := expected[job.Name]
+		if !ok {
+			continue
+		}
+		group := "by (" + want.dimensions + `, "microsoft.resourceid", microsoft_resourceid, resourceID, region, location)`
+		if len(job.Params["query"]) != 1 || strings.Count(job.Params["query"][0], group) != want.groups {
+			t.Errorf("job %q must preserve resource/region labels and business dimensions in all %d groups", job.Name, want.groups)
+		}
+		delete(expected, job.Name)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("missing API Server jobs: %v", expected)
+	}
+}
+
 func TestDeploymentConfig(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "metrics-scraper.yaml"))
 	if err != nil {

@@ -25,7 +25,8 @@ scrape_configs:
     # Automatically collects every workspace configured in the exporter.
     metrics_path: /probe/metrics/promql
     params:
-      query: ['sum(rate(apiserver_request_total[5m])) by (cluster, code)']
+      # 保留资源及区域标签，让 exporter 为聚合结果查询并缓存真实 region。
+      query: ['sum(rate(apiserver_request_total[5m])) by (cluster, code, "microsoft.resourceid", microsoft_resourceid, resourceID, region, location)']
       # 返回完整窗口及源采样时间。
       format: ["json"]
       # 即时查询：先在 job 设置 rolling_range: {enabled: false}。
@@ -37,7 +38,7 @@ scrape_configs:
     metric_name: apiserver_request_rate_by_verb
     metrics_path: /probe/metrics/promql
     params:
-      query: ['sum(rate(apiserver_request_total[5m])) by (cluster, verb)']
+      query: ['sum(rate(apiserver_request_total[5m])) by (cluster, verb, "microsoft.resourceid", microsoft_resourceid, resourceID, region, location)']
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
@@ -46,7 +47,7 @@ scrape_configs:
     metric_name: apiserver_error_rate_5xx
     metrics_path: /probe/metrics/promql
     params:
-      query: ['sum(rate(apiserver_request_total{code=~"5.."}[5m])) by (cluster)']
+      query: ['sum(rate(apiserver_request_total{code=~"5.."}[5m])) by (cluster, "microsoft.resourceid", microsoft_resourceid, resourceID, region, location)']
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
@@ -55,7 +56,7 @@ scrape_configs:
     metric_name: apiserver_error_ratio_pct
     metrics_path: /probe/metrics/promql
     params:
-      query: ['100 * sum(rate(apiserver_request_total{code=~"5.."}[5m])) by (cluster) / sum(rate(apiserver_request_total[5m])) by (cluster)']
+      query: ['100 * sum(rate(apiserver_request_total{code=~"5.."}[5m])) by (cluster, "microsoft.resourceid", microsoft_resourceid, resourceID, region, location) / sum(rate(apiserver_request_total[5m])) by (cluster, "microsoft.resourceid", microsoft_resourceid, resourceID, region, location)']
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
@@ -64,7 +65,7 @@ scrape_configs:
     metric_name: apiserver_request_latency_p99
     metrics_path: /probe/metrics/promql
     params:
-      query: ['histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (cluster, le, verb))']
+      query: ['histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (cluster, le, verb, "microsoft.resourceid", microsoft_resourceid, resourceID, region, location))']
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
@@ -73,7 +74,7 @@ scrape_configs:
     metric_name: apiserver_request_latency_p50
     metrics_path: /probe/metrics/promql
     params:
-      query: ['histogram_quantile(0.50, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (cluster, le, verb))']
+      query: ['histogram_quantile(0.50, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (cluster, le, verb, "microsoft.resourceid", microsoft_resourceid, resourceID, region, location))']
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
@@ -82,7 +83,7 @@ scrape_configs:
     metric_name: apiserver_inflight_requests
     metrics_path: /probe/metrics/promql
     params:
-      query: ['sum(apiserver_current_inflight_requests) by (cluster, request_kind)']
+      query: ['sum(apiserver_current_inflight_requests) by (cluster, request_kind, "microsoft.resourceid", microsoft_resourceid, resourceID, region, location)']
       format: ["json"]
     static_configs:
       - targets: *exporter_targets
