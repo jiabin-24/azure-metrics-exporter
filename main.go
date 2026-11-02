@@ -24,11 +24,7 @@ import (
 	"github.com/webdevops/azure-metrics-exporter/config"
 )
 
-const (
-	Author = "webdevops.io"
-
-	UserAgent = "azure-metrics-exporter/"
-)
+const UserAgent = "azure-metrics-exporter/"
 
 var (
 	argparser *flags.Parser
@@ -72,7 +68,7 @@ func main() {
 		}
 	}
 
-	logger.Info(fmt.Sprintf("starting azure-metrics-exporter v%s (%s; %s; by %v at %v)", gitTag, gitCommit, runtime.Version(), Author, buildDate))
+	logger.Info(fmt.Sprintf("starting azure-metrics-exporter v%s (%s; %s; built at %s)", gitTag, gitCommit, runtime.Version(), buildDate))
 	logger.Info(string(Opts.GetJson()))
 	initSystem()
 	metricsCache = cache.New(1*time.Minute, 1*time.Minute)

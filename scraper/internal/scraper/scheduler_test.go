@@ -102,7 +102,7 @@ func TestClusteredSchedulerAssignsWholeBatches(t *testing.T) {
 		if len(delivered) != 0 {
 			t.Fatal("cluster startup collected a partially elapsed batch")
 		}
-		time.Sleep(first.Sub(time.Now()))
+		time.Sleep(time.Until(first))
 		synctest.Wait()
 		for i := range 12 {
 			if i > 0 {
@@ -159,7 +159,7 @@ func TestClusteredSchedulerRetainsLateDataUntilSelectedAgain(t *testing.T) {
 				return start.Equal(first) || start.Equal(first.Add(3*interval))
 			})
 		synctest.Wait()
-		time.Sleep(first.Sub(time.Now()))
+		time.Sleep(time.Until(first))
 		synctest.Wait()
 		time.Sleep(interval)
 		synctest.Wait()
@@ -220,7 +220,7 @@ func TestClusteredSchedulerDoesNotTakeOverMidBatch(t *testing.T) {
 				return batchOwner(interval, start, members) == survivor
 			})
 		synctest.Wait()
-		time.Sleep(first.Sub(time.Now()) + 10*time.Second)
+		time.Sleep(time.Until(first) + 10*time.Second)
 		synctest.Wait()
 		members = []string{survivor}
 		time.Sleep(49 * time.Second)
@@ -260,7 +260,7 @@ func TestClusteredSchedulerDoesNotCancelOnOwnershipChange(t *testing.T) {
 				return !start.Equal(first.Add(2 * interval))
 			})
 		synctest.Wait()
-		time.Sleep(first.Sub(time.Now()) + 3*interval)
+		time.Sleep(time.Until(first) + 3*interval)
 		synctest.Wait()
 		if len(started) != 1 || len(deliveries) != 0 {
 			t.Fatal("new batch overlapped or cancelled an existing local task")

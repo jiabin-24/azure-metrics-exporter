@@ -2,10 +2,6 @@
 
 [返回快速启动](README.md)
 
-[![license](https://img.shields.io/github/license/webdevops/azure-metrics-exporter.svg)](https://github.com/webdevops/azure-metrics-exporter/blob/master/LICENSE)
-[![DockerHub](https://img.shields.io/badge/DockerHub-webdevops%2Fazure--metrics--exporter-blue)](https://hub.docker.com/r/webdevops/azure-metrics-exporter/)
-[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/azure-metrics-exporter)](https://artifacthub.io/packages/search?repo=azure-metrics-exporter)
-
 用于导出 Azure Monitor 指标的 Prometheus 导出器。
 支持通过一次抓取获取所有资源的指标（自动服务发现）、使用模板自定义指标名称、完整的维度支持以及缓存。
 
@@ -55,16 +51,9 @@
 - 可在抓取配置中处理指标（添加、删除、更新或筛选标签或指标），例如 [`metric_relabel_configs`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#metric_relabel_configs)
 - 完整支持指标[维度](#virtualnetworkgateway-connections-dimension-support)
 - Docker 镜像基于 [Google 的 distroless](https://github.com/GoogleContainerTools/distroless) 静态镜像构建，以缩小攻击面（镜像中不含 shell 或其他二进制文件）
-- 可通过 Docker Hub 获取（参见上方徽章）
+- 容器镜像部署方式参见[部署说明](deploy/README.md)
 - 可使用非 root 用户运行，并将根文件系统设为只读；无需任何 Linux capability（可以安全地设置 `drop: ["All"]`）
 - 提供 Azure API 速率限制指标（导出器发送 Azure API 请求时，这些指标可通过 `/metrics` 获取）
-
-可与以下导出器配合使用：
-
-- [azure-resourcegraph-exporter](https://github.com/webdevops/azure-resourcegraph-exporter)：使用自定义 Kusto 查询从 Azure Resource Graph API 导出 Azure 资源信息（例如获取资源和资源组的标记）
-- [azure-resourcemanager-exporter](https://github.com/webdevops/azure-resourcemanager-exporter)：导出 Azure 订阅信息（例如速率限制、订阅配额、服务主体过期时间、角色分配、资源运行状况等）
-- [azure-keyvault-exporter](https://github.com/webdevops/azure-keyvault-exporter)：导出 Azure Key Vault 信息（例如机密、证书和密钥的过期时间）
-- [azure-loganalytics-exporter](https://github.com/webdevops/azure-loganalytics-exporter)：使用自定义 Kusto 查询导出 Azure Log Analytics 工作区信息（例如数据引入速率或应用程序错误数量）
 
 <a id="configuration"></a>
 ## 配置

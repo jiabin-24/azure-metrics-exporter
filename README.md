@@ -1,8 +1,5 @@
 # Azure Monitor metrics exporter
 
-[![license](https://img.shields.io/github/license/webdevops/azure-metrics-exporter.svg)](https://github.com/webdevops/azure-metrics-exporter/blob/master/LICENSE)
-[![DockerHub](https://img.shields.io/badge/DockerHub-webdevops%2Fazure--metrics--exporter-blue)](https://hub.docker.com/r/webdevops/azure-metrics-exporter/)
-
 导出 Azure Monitor 平台指标及托管 Prometheus 指标，支持 Prometheus 文本和 JSON 输出。
 
 ## 快速启动
