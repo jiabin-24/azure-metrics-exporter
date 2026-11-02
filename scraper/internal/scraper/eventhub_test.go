@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -302,37 +302,42 @@ func TestLiveEventHubDelivery(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	var delivered atomic.Int64
+	var mu sync.Mutex
+	var batches []Batch
 	s := New(cfg, logger, func(ctx context.Context, batch Batch) error {
-		if batch.Window == nil || len(batch.Window.Metrics) == 0 {
-			return fmt.Errorf("live scrape returned no metrics; cannot verify delivery")
-		}
-		if err := sink(ctx, batch); err != nil {
-			return err
-		}
-		delivered.Add(1)
+		mu.Lock()
+		defer mu.Unlock()
+		batches = append(batches, batch)
 		return nil
 	})
 	defer s.Client.CloseIdleConnections()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if err := s.ResolveWorkspaces(ctx); err != nil {
+		t.Fatal(err)
+	}
 	var results []<-chan error
-	for _, job := range cfg.Jobs {
-		for _, group := range job.StaticConfigs {
-			for _, target := range group.Targets {
-				result := make(chan error, 1)
-				results = append(results, result)
-				go func() { result <- s.Scrape(ctx, job, target, group.Labels) }()
-			}
-		}
+	for _, task := range cfg.Tasks() {
+		result := make(chan error, 1)
+		results = append(results, result)
+		go func() { result <- s.Scrape(ctx, task.Job, task.Target, task.Labels) }()
 	}
 	for _, result := range results {
 		if err := <-result; err != nil {
 			t.Error(err)
 		}
 	}
-	if delivered.Load() == 0 {
-		t.Fatal("no live batches delivered")
+	nonempty := false
+	for _, batch := range batches {
+		if batch.Window != nil && len(batch.Window.Metrics) > 0 {
+			nonempty = true
+		}
+	}
+	if !nonempty {
+		t.Fatal("live scrape returned no metrics; cannot verify delivery")
+	}
+	if err := sink(ctx, batches); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -374,18 +379,11 @@ scrape_configs:
   - targets: [localhost:8080]
 `
 	cfg, err := ParseConfig([]byte(valid))
-	if err != nil || cfg.EventHub.BatchWindow != Duration(5*time.Second) {
-		t.Fatalf("incorrect default batch window: %+v, %v", cfg, err)
-	}
-	custom := strings.Replace(valid, "name: metrics", "name: metrics\n  batch_window: 2s", 1)
-	cfg, err = ParseConfig([]byte(custom))
-	if err != nil || cfg.EventHub.BatchWindow != Duration(2*time.Second) {
-		t.Fatalf("incorrect custom batch window: %+v, %v", cfg, err)
+	if err != nil || cfg.EventHub == nil {
+		t.Fatalf("valid Event Hub config rejected: %+v, %v", cfg, err)
 	}
 	for _, value := range []string{
-		strings.Replace(custom, "batch_window: 2s", "batch_window: 0s", 1),
-		strings.Replace(custom, "batch_window: 2s", "batch_window: -1s", 1),
-		strings.Replace(custom, "batch_window: 2s", "batch_window: invalid", 1),
+		strings.Replace(valid, "name: metrics", "name: metrics\n  batch_window: 5s", 1),
 		strings.Replace(valid, "example.servicebus.windows.net", "https://example.servicebus.windows.net", 1),
 		strings.Replace(valid, "name: metrics", "name: ''", 1),
 		strings.Replace(valid, "/probe/metrics/promql", "/metrics", 1),

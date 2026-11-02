@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -96,14 +95,7 @@ func validateConnectionString(connection string, cfg EventHubConfig) error {
 	return nil
 }
 
-func NewEventHubSink(cfg EventHubConfig, logger *slog.Logger) (Sink, func(context.Context) error, error) {
-	window := time.Duration(cfg.BatchWindow)
-	if window == 0 {
-		window = 5 * time.Second
-	}
-	if window < 0 {
-		return nil, nil, fmt.Errorf("event hub batch_window must be positive")
-	}
+func NewEventHubSink(cfg EventHubConfig, logger *slog.Logger) (BatchSink, func(context.Context) error, error) {
 	connection := os.Getenv("AZURE_EVENTHUB_CONNECTION_STRING")
 	if err := validateConnectionString(connection, cfg); err != nil {
 		return nil, nil, err
@@ -113,10 +105,7 @@ func NewEventHubSink(cfg EventHubConfig, logger *slog.Logger) (Sink, func(contex
 		// Do not include SDK constructor errors that might contain credential input.
 		return nil, nil, fmt.Errorf("create Event Hub SAS producer: invalid connection configuration")
 	}
-	buffer := newEventHubBuffer(eventHubSender{client}, logger, window)
-	return buffer.Send, func(ctx context.Context) error {
-		return errors.Join(buffer.Close(ctx), client.Close(ctx))
-	}, nil
+	return eventHubBatchSink(eventHubSender{client}, logger), client.Close, nil
 }
 
 func eventHubSink(sender eventSender, logger *slog.Logger) Sink {

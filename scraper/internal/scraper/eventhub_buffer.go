@@ -2,120 +2,37 @@ package scraper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
 	"strings"
-	"sync"
-	"time"
 )
 
-type windowRequest struct {
-	windows []exportWindow
-	result  chan error
-}
-
-type eventHubBuffer struct {
-	requests  chan windowRequest
-	stop      chan context.Context
-	done      chan struct{}
-	closeOnce sync.Once
-	closeErr  error
-	logger    *slog.Logger
-}
-
-func newEventHubBuffer(sender eventSender, logger *slog.Logger, interval time.Duration) *eventHubBuffer {
-	buffer := &eventHubBuffer{
-		requests: make(chan windowRequest), stop: make(chan context.Context, 1),
-		done: make(chan struct{}), logger: logger,
-	}
-	go buffer.run(sender, interval)
-	return buffer
-}
-
-func (b *eventHubBuffer) Send(ctx context.Context, batch Batch) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	windows, err := windowsForExport(batch, b.logger)
-	if err != nil {
-		return err
-	}
-	if len(windows) == 0 {
-		return nil
-	}
-	// Reject an invalid batch before it can poison other jobs in the buffer.
-	for _, window := range windows {
-		if _, err := splitWindow(window, eventBodyLimit); err != nil {
+func eventHubBatchSink(sender eventSender, logger *slog.Logger) BatchSink {
+	return func(ctx context.Context, batches []Batch) error {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-	}
-	request := windowRequest{windows: windows, result: make(chan error, 1)}
-	select {
-	case <-b.done:
-		return fmt.Errorf("event hub buffer is closed")
-	case <-ctx.Done():
-		return ctx.Err()
-	case b.requests <- request:
-	}
-	select {
-	case err := <-request.result:
-		return err
-	case <-ctx.Done():
-		// Accepted data remains queued for flushing, including during shutdown.
-		return ctx.Err()
-	}
-}
-
-func (b *eventHubBuffer) Close(ctx context.Context) error {
-	b.closeOnce.Do(func() { b.stop <- ctx })
-	select {
-	case <-b.done:
-		return b.closeErr
-	case <-ctx.Done():
-		return fmt.Errorf("flush Event Hub buffer: %w", ctx.Err())
-	}
-}
-
-func (b *eventHubBuffer) run(sender eventSender, interval time.Duration) {
-	defer close(b.done)
-	var pending []windowRequest
-	var timer *time.Timer
-	var tick <-chan time.Time
-	flush := func(ctx context.Context) error {
 		var windows []exportWindow
-		for _, request := range pending {
-			windows = append(windows, request.windows...)
-		}
-		err := sendWindows(ctx, sender, b.logger, mergeWindows(windows))
-		if err != nil {
-			b.logger.Error("buffered Event Hub delivery failed", "batches", len(pending), "error", err)
-		}
-		for _, request := range pending {
-			request.result <- err
-		}
-		pending = nil
-		return err
-	}
-	for {
-		select {
-		case request := <-b.requests:
-			pending = append(pending, request)
-			if timer == nil {
-				timer = time.NewTimer(interval)
-				tick = timer.C
+		var validationErr error
+		for _, batch := range batches {
+			batchWindows, err := windowsForExport(batch, logger)
+			if err == nil {
+				for _, window := range batchWindows {
+					if _, err = splitWindow(window, eventBodyLimit); err != nil {
+						break
+					}
+				}
 			}
-		case <-tick:
-			// flush logs errors and returns them to the pending requests.
-			_ = flush(context.Background())
-			timer, tick = nil, nil
-		case ctx := <-b.stop:
-			if timer != nil {
-				timer.Stop()
+			if err != nil {
+				logger.Error("invalid Event Hub batch", "job", batch.Job, "task_id", batch.TaskID, "error", err)
+				validationErr = errors.Join(validationErr, fmt.Errorf("job %q: %w", batch.Job, err))
+				continue
 			}
-			b.closeErr = flush(ctx)
-			return
+			windows = append(windows, batchWindows...)
 		}
+		return errors.Join(validationErr, sendWindows(ctx, sender, logger, mergeWindows(windows)))
 	}
 }
 

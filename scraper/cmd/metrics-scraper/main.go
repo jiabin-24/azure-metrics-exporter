@@ -35,9 +35,10 @@ func run(ctx context.Context, configPath, address string, logger *slog.Logger) (
 		return err
 	}
 	sink := scraper.DiscardSink(logger)
+	var batchSink scraper.BatchSink
 	if cfg.EventHub != nil {
 		var closeProducer func(context.Context) error
-		sink, closeProducer, err = scraper.NewEventHubSink(*cfg.EventHub, logger)
+		batchSink, closeProducer, err = scraper.NewEventHubSink(*cfg.EventHub, logger)
 		if err != nil {
 			return err
 		}
@@ -52,6 +53,7 @@ func run(ctx context.Context, configPath, address string, logger *slog.Logger) (
 		logger.Warn("Event Hub is not configured; collected batches will be discarded")
 	}
 	worker := scraper.New(cfg, logger, sink)
+	worker.BatchSink = batchSink
 	defer worker.Client.CloseIdleConnections()
 	if err := worker.ResolveWorkspaces(ctx); err != nil {
 		return err

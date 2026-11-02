@@ -9,67 +9,38 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/webdevops/azure-metrics-exporter/internal/metricdata"
 )
 
-func TestEventHubBufferMergesJobsWithinFixedWindow(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		sender := &recordingSender{}
-		buffer := newEventHubBuffer(sender, quietLogger(), 5*time.Second)
-		defer func() {
-			if err := buffer.Close(context.Background()); err != nil {
-				t.Error(err)
-			}
-		}()
-		first, second := eventTestBatch(), eventTestBatch()
-		second.Job, second.Query = "other", "other_query"
-		second.Window.Metrics[0].Name = "other_metric"
-		for i := range second.Window.Metrics[0].Samples {
-			second.Window.Metrics[0].Samples[i].Timestamp = second.Window.Metrics[0].Samples[i].Timestamp.Add(time.Second)
-		}
-		results := make(chan error, 2)
-		go func() { results <- buffer.Send(context.Background(), first) }()
-		synctest.Wait()
-		time.Sleep(4 * time.Second)
-		go func() { results <- buffer.Send(context.Background(), second) }()
-		synctest.Wait()
-		if len(sender.bodies) != 0 || len(results) != 0 {
-			t.Fatal("sent or acknowledged data before the aggregation window elapsed")
-		}
-		time.Sleep(time.Second)
-		synctest.Wait()
-		for range 2 {
-			if err := <-results; err != nil {
-				t.Fatal(err)
-			}
-		}
-		if len(sender.bodies) != 1 {
-			t.Fatalf("expected one merged event, got %d", len(sender.bodies))
-		}
-		var got exportWindow
-		if err := json.Unmarshal(sender.bodies[0], &got); err != nil {
-			t.Fatal(err)
-		}
-		if len(got.Metrics) != 2 || got.Metrics[0].PromQL != first.Query ||
-			got.Metrics[1].PromQL != second.Query ||
-			!reflect.DeepEqual(got.Metrics[1].Samples, second.Window.Metrics[0].Samples) ||
-			!reflect.DeepEqual(got.Metrics[1].Labels, second.Window.Metrics[0].Labels) ||
-			!got.WindowStart.Equal(first.Window.Metrics[0].Samples[0].Timestamp) ||
-			!got.WindowEnd.Equal(second.Window.Metrics[0].Samples[1].Timestamp) ||
-			bytes.Contains(sender.bodies[0], []byte(`"taskId"`)) {
-			t.Fatalf("merged data or metadata incorrect: %s", sender.bodies[0])
-		}
-		go func() { results <- buffer.Send(context.Background(), first) }()
-		synctest.Wait()
-		time.Sleep(5 * time.Second)
-		synctest.Wait()
-		if err := <-results; err != nil || len(sender.bodies) != 2 {
-			t.Fatalf("subsequent window not flushed: %v", err)
-		}
-	})
+func TestEventHubBatchSinkMergesJobs(t *testing.T) {
+	sender := &recordingSender{}
+	first, second := eventTestBatch(), eventTestBatch()
+	second.Job, second.Query = "other", "other_query"
+	second.Window.Metrics[0].Name = "other_metric"
+	for i := range second.Window.Metrics[0].Samples {
+		second.Window.Metrics[0].Samples[i].Timestamp = second.Window.Metrics[0].Samples[i].Timestamp.Add(time.Second)
+	}
+	if err := eventHubBatchSink(sender, quietLogger())(context.Background(), []Batch{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.bodies) != 1 {
+		t.Fatalf("expected one merged event, got %d", len(sender.bodies))
+	}
+	var got exportWindow
+	if err := json.Unmarshal(sender.bodies[0], &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Metrics) != 2 || got.Metrics[0].PromQL != first.Query ||
+		got.Metrics[1].PromQL != second.Query ||
+		!reflect.DeepEqual(got.Metrics[1].Samples, second.Window.Metrics[0].Samples) ||
+		!reflect.DeepEqual(got.Metrics[1].Labels, second.Window.Metrics[0].Labels) ||
+		!got.WindowStart.Equal(first.Window.Metrics[0].Samples[0].Timestamp) ||
+		!got.WindowEnd.Equal(second.Window.Metrics[0].Samples[1].Timestamp) ||
+		bytes.Contains(sender.bodies[0], []byte(`"taskId"`)) {
+		t.Fatalf("merged data or metadata incorrect: %s", sender.bodies[0])
+	}
 }
 
 func TestMergeWindowsCompatibility(t *testing.T) {
@@ -117,134 +88,62 @@ func TestMergeWindowsCompatibility(t *testing.T) {
 	}
 }
 
-func TestEventHubBufferFlushesAcceptedDataOnClose(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		sender := &recordingSender{}
-		buffer := newEventHubBuffer(sender, quietLogger(), time.Hour)
-		ctx, cancel := context.WithCancel(context.Background())
-		result := make(chan error, 1)
-		go func() { result <- buffer.Send(ctx, eventTestBatch()) }()
-		synctest.Wait()
-		cancel()
-		synctest.Wait()
-		if err := <-result; !errors.Is(err, context.Canceled) {
-			t.Fatalf("cancellation not returned: %v", err)
-		}
-		if err := buffer.Close(context.Background()); err != nil || len(sender.bodies) != 1 {
-			t.Fatalf("shutdown lost accepted data: %v, events=%d", err, len(sender.bodies))
-		}
-		if err := buffer.Close(context.Background()); err != nil {
+func TestEventHubBatchSinkPacksMergedJobs(t *testing.T) {
+	sender := &recordingSender{}
+	var batches []Batch
+	for range 5 {
+		batch := eventTestBatch()
+		batch.Window.Metrics[0].Labels["large"] = strings.Repeat("x", 50*1024)
+		batches = append(batches, batch)
+	}
+	if err := eventHubBatchSink(sender, quietLogger())(context.Background(), batches); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.bodies) != 2 {
+		t.Fatalf("expected 2 events for 5 merged jobs, got %d", len(sender.bodies))
+	}
+	total := 0
+	for _, body := range sender.bodies {
+		var got exportWindow
+		if err := json.Unmarshal(body, &got); err != nil {
 			t.Fatal(err)
 		}
-		if err := buffer.Send(context.Background(), eventTestBatch()); err == nil {
-			t.Fatal("closed buffer accepted data")
+		total += len(got.Metrics)
+		if len(body) > eventBodyLimit {
+			t.Fatalf("merged event exceeds 200 KiB: %d", len(body))
 		}
-	})
+	}
+	if total != 5 || sender.keys[0] != sender.keys[1] {
+		t.Fatal("packing lost metrics or changed the partition key")
+	}
 }
 
-func TestEventHubBufferPacksMergedJobs(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		sender := &recordingSender{}
-		buffer := newEventHubBuffer(sender, quietLogger(), time.Second)
-		defer buffer.Close(context.Background())
-		results := make(chan error, 5)
-		for range 5 {
-			batch := eventTestBatch()
-			batch.Window.Metrics[0].Labels["large"] = strings.Repeat("x", 50*1024)
-			go func() { results <- buffer.Send(context.Background(), batch) }()
-		}
-		synctest.Wait()
-		time.Sleep(time.Second)
-		synctest.Wait()
-		for range 5 {
-			if err := <-results; err != nil {
-				t.Fatal(err)
-			}
-		}
-		if len(sender.bodies) != 2 {
-			t.Fatalf("expected 2 events for 5 merged jobs, got %d", len(sender.bodies))
-		}
-		total := 0
-		for _, body := range sender.bodies {
-			var got exportWindow
-			if err := json.Unmarshal(body, &got); err != nil {
-				t.Fatal(err)
-			}
-			total += len(got.Metrics)
-			if len(body) > eventBodyLimit {
-				t.Fatalf("merged event exceeds 200 KiB: %d", len(body))
-			}
-		}
-		if total != 5 || sender.keys[0] != sender.keys[1] {
-			t.Fatal("packing lost metrics or changed the partition key")
-		}
-	})
+func TestEventHubBatchSinkReturnsDeliveryFailure(t *testing.T) {
+	sink := eventHubBatchSink(&recordingSender{failAt: 1}, quietLogger())
+	if err := sink(context.Background(), []Batch{eventTestBatch(), eventTestBatch()}); err == nil ||
+		!strings.Contains(err.Error(), "0/1 acknowledged") {
+		t.Fatalf("delivery failure not propagated: %v", err)
+	}
 }
 
-func TestEventHubBufferCloseReportsDeliveryFailure(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		buffer := newEventHubBuffer(&recordingSender{failAt: 1}, quietLogger(), time.Hour)
-		result := make(chan error, 1)
-		go func() { result <- buffer.Send(context.Background(), eventTestBatch()) }()
-		synctest.Wait()
-		if err := buffer.Close(context.Background()); err == nil {
-			t.Fatal("shutdown delivery failure reported as success")
-		}
-		if err := <-result; err == nil {
-			t.Fatal("shutdown delivery failure did not reach the waiting job")
-		}
-	})
-}
-
-func TestEventHubBufferDeliveryErrorsReachAllJobs(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var logs bytes.Buffer
-		sender := &recordingSender{failAt: 1}
-		buffer := newEventHubBuffer(sender, slog.New(slog.NewTextHandler(&logs, nil)), time.Second)
-		defer buffer.Close(context.Background())
-		results := make(chan error, 2)
-		for range 2 {
-			go func() { results <- buffer.Send(context.Background(), eventTestBatch()) }()
-		}
-		synctest.Wait()
-		time.Sleep(time.Second)
-		synctest.Wait()
-		for range 2 {
-			if err := <-results; err == nil || !strings.Contains(err.Error(), "0/1 acknowledged") {
-				t.Fatalf("delivery failure not propagated: %v", err)
-			}
-		}
-		if !strings.Contains(logs.String(), "buffered Event Hub delivery failed") ||
-			strings.Contains(logs.String(), "delivery completed") {
-			t.Fatalf("failure not logged correctly: %s", &logs)
-		}
-	})
-}
-
-func TestEventHubBufferRejectsInvalidBatchWithoutPoisoningOthers(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		sender := &recordingSender{}
-		buffer := newEventHubBuffer(sender, quietLogger(), time.Second)
-		defer buffer.Close(context.Background())
-		bad := eventTestBatch()
-		bad.Query = strings.Repeat("x", eventBodyLimit)
-		if err := buffer.Send(context.Background(), bad); err == nil {
-			t.Fatal("oversized sample accepted")
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		if err := buffer.Send(ctx, eventTestBatch()); !errors.Is(err, context.Canceled) {
-			t.Fatalf("canceled batch accepted: %v", err)
-		}
-		result := make(chan error, 1)
-		go func() { result <- buffer.Send(context.Background(), eventTestBatch()) }()
-		synctest.Wait()
-		time.Sleep(time.Second)
-		synctest.Wait()
-		if err := <-result; err != nil || len(sender.bodies) != 1 {
-			t.Fatalf("healthy batch affected by rejection: %v", err)
-		}
-	})
+func TestEventHubBatchSinkRejectsInvalidBatchWithoutPoisoningOthers(t *testing.T) {
+	sender := &recordingSender{}
+	var logs bytes.Buffer
+	sink := eventHubBatchSink(sender, slog.New(slog.NewTextHandler(&logs, nil)))
+	bad := eventTestBatch()
+	bad.Query = strings.Repeat("x", eventBodyLimit)
+	if err := sink(context.Background(), []Batch{bad, eventTestBatch()}); err == nil ||
+		len(sender.bodies) != 1 || !strings.Contains(logs.String(), "invalid Event Hub batch") {
+		t.Fatalf("invalid batch was not reported or poisoned valid data: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := sink(ctx, []Batch{eventTestBatch()}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation not returned: %v", err)
+	}
+	if len(sender.bodies) != 1 {
+		t.Fatal("cancelled batch was sent")
+	}
 }
 
 func TestPackedWindowsUseCapacityInsteadOfHalving(t *testing.T) {
@@ -252,7 +151,6 @@ func TestPackedWindowsUseCapacityInsteadOfHalving(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	t.Run("largest fitting sample prefix", func(t *testing.T) {
 		windows, err := exportWindows(eventTestBatch())
 		if err != nil {

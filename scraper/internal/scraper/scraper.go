@@ -39,12 +39,15 @@ type Batch struct {
 
 type Sink func(context.Context, Batch) error
 
+type BatchSink func(context.Context, []Batch) error
+
 type Scraper struct {
-	Config  *Config
-	Cluster *Cluster
-	Client  *http.Client
-	Logger  *slog.Logger
-	Sink    Sink
+	Config    *Config
+	Cluster   *Cluster
+	Client    *http.Client
+	Logger    *slog.Logger
+	Sink      Sink
+	BatchSink BatchSink
 }
 
 func New(cfg *Config, logger *slog.Logger, sink Sink) *Scraper {
@@ -64,6 +67,10 @@ func New(cfg *Config, logger *slog.Logger, sink Sink) *Scraper {
 func (s *Scraper) Run(ctx context.Context) {
 	defer s.Client.CloseIdleConnections()
 	tasks := s.Config.Tasks()
+	if s.BatchSink != nil {
+		s.runBufferedTasks(ctx, tasks)
+		return
+	}
 	if s.Cluster != nil {
 		s.runClusterTasks(ctx, tasks)
 		return

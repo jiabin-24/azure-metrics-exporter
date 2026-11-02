@@ -65,7 +65,6 @@ Invoke-WebRequest "http://127.0.0.1:8081/readyz"
 | `metric_name` | 可选，指定单条 PromQL JSON 查询的输出指标名 |
 | `params.query` | PromQL 表达式，每个任务一条 |
 | `params.format` | 发送到 Event Hub 时使用 `["json"]` |
-| `event_hub.batch_window` | 单实例跨 job 汇聚等待窗口，默认 `5s`，必须为正时长 |
 | `static_configs.labels` | 静态元数据，例如 `cluster`、`region` |
 
 ### 时间戳语义

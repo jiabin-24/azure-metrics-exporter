@@ -74,12 +74,15 @@ func startTestCluster(t *testing.T, cfg *Config) *Cluster {
 	return c
 }
 
-func startTestWorker(t *testing.T, cfg *Config, cluster *Cluster, sink Sink) func() {
+func startTestWorker(t *testing.T, cfg *Config, cluster *Cluster, sink Sink, batchSinks ...BatchSink) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	worker := New(cfg, quietLogger(), sink)
 	worker.Cluster = cluster
+	if len(batchSinks) > 0 {
+		worker.BatchSink = batchSinks[0]
+	}
 	go func() {
 		defer close(done)
 		worker.Run(ctx)
@@ -307,6 +310,13 @@ func TestClusterLabelIsolation(t *testing.T) {
 }
 
 func TestClusterWorkerHandoffPreservesUnchangedTasks(t *testing.T) {
+	t.Run("unbuffered", func(t *testing.T) { testClusterWorkerHandoff(t, nil) })
+	t.Run("buffered", func(t *testing.T) {
+		testClusterWorkerHandoff(t, func(context.Context, []Batch) error { return nil })
+	})
+}
+
+func testClusterWorkerHandoff(t *testing.T, batchSink BatchSink) {
 	started := make(chan string, 100)
 	canceled := make(chan string, 100)
 	var mu sync.Mutex
@@ -328,7 +338,7 @@ func TestClusterWorkerHandoffPreservesUnchangedTasks(t *testing.T) {
 	}
 	cfg := &Config{Jobs: []Job{job}}
 	first := testCluster(t, cfg, "first")
-	stopFirst := startTestWorker(t, cfg, first, DiscardSink(quietLogger()))
+	stopFirst := startTestWorker(t, cfg, first, DiscardSink(quietLogger()), batchSink)
 	defer stopFirst()
 	receive := func(channel <-chan string, count int) []string {
 		var values []string
@@ -363,7 +373,7 @@ func TestClusterWorkerHandoffPreservesUnchangedTasks(t *testing.T) {
 			t.Fatalf("unchanged task was canceled: %s", workspace)
 		}
 	}
-	stopSecond := startTestWorker(t, cfg, second, DiscardSink(quietLogger()))
+	stopSecond := startTestWorker(t, cfg, second, DiscardSink(quietLogger()), batchSink)
 	defer stopSecond()
 	for _, workspace := range receive(started, len(moved)) {
 		if !moved[workspace] {
