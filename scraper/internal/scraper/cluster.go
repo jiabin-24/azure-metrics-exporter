@@ -235,6 +235,15 @@ func taskOwner(id string, members []string) string {
 	return owner
 }
 
+// 批次由周期和统一起始时间标识；同一批的所有任务使用同一个 owner，不要求轮流执行。
+func batchOwner(interval time.Duration, start time.Time, members []string) string {
+	return taskOwner(fmt.Sprintf("batch:%d:%d", interval, start.UnixNano()), members)
+}
+
+func batchStart(now time.Time, interval time.Duration) time.Time {
+	return time.Unix(0, now.UnixNano()-now.UnixNano()%int64(interval)).UTC()
+}
+
 func (c *Cluster) NotifyJoin(*memberlist.Node)   { c.notify() }
 func (c *Cluster) NotifyLeave(*memberlist.Node)  { c.notify() }
 func (c *Cluster) NotifyUpdate(*memberlist.Node) { c.notify() }

@@ -47,7 +47,7 @@ func schedulerJob(name string, interval time.Duration) Job {
 	return job
 }
 
-func startBufferedWorker(t *testing.T, jobs []Job, transport schedulerTransport, sink BatchSink, logger *slog.Logger) func() {
+func startBufferedWorker(t *testing.T, jobs []Job, transport schedulerTransport, sink BatchSink, logger *slog.Logger, ownership ...func(time.Duration, time.Time) bool) func() {
 	t.Helper()
 	s := New(&Config{Jobs: jobs, EventHub: &EventHubConfig{}}, logger, nil)
 	s.Client.Transport, s.BatchSink = transport, sink
@@ -55,11 +55,223 @@ func startBufferedWorker(t *testing.T, jobs []Job, transport schedulerTransport,
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.Run(ctx)
+		if len(ownership) > 0 {
+			defer s.Client.CloseIdleConnections()
+			s.runBufferedTasksWithOwner(ctx, s.Config.Tasks(), ownership[0])
+		} else {
+			s.Run(ctx)
+		}
 	}()
 	stop := func() { cancel(); <-done }
 	t.Cleanup(stop)
 	return stop
+}
+
+func TestClusteredSchedulerAssignsWholeBatches(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		type delivery struct {
+			node  string
+			start time.Time
+			body  []byte
+		}
+		delivered := make(chan delivery, 100)
+		interval := time.Minute
+		first := batchStart(time.Now(), interval).Add(interval)
+		members := []string{"a", "b"}
+		jobs := []Job{schedulerJob("first", interval), schedulerJob("second", interval)}
+		for _, node := range members {
+			startBufferedWorker(t, jobs, func(_ *http.Request) (*http.Response, error) {
+				return schedulerResponse(t, false), nil
+			}, func(ctx context.Context, batches []Batch) error {
+				if len(batches) != len(jobs) {
+					t.Errorf("node %s received only %d/%d tasks", node, len(batches), len(jobs))
+				}
+				sender := &recordingSender{}
+				if err := eventHubBatchSink(sender, quietLogger())(ctx, batches); err != nil {
+					return err
+				}
+				for _, body := range sender.bodies {
+					delivered <- delivery{node: node, start: batchStart(time.Now(), interval), body: body}
+				}
+				return nil
+			}, quietLogger(), func(interval time.Duration, start time.Time) bool {
+				return batchOwner(interval, start, members) == node
+			})
+		}
+		synctest.Wait()
+		if len(delivered) != 0 {
+			t.Fatal("cluster startup collected a partially elapsed batch")
+		}
+		time.Sleep(first.Sub(time.Now()))
+		synctest.Wait()
+		for i := range 12 {
+			if i > 0 {
+				time.Sleep(interval)
+				synctest.Wait()
+			}
+			if len(delivered) != 1 {
+				t.Fatalf("batch %d produced %d messages instead of one", i, len(delivered))
+			}
+			got := <-delivered
+			wantStart := first.Add(time.Duration(i) * interval)
+			if !got.start.Equal(wantStart) || got.node != batchOwner(interval, wantStart, members) {
+				t.Fatalf("batch dispatched to wrong owner/time: %+v", got)
+			}
+			var window exportWindow
+			if err := json.Unmarshal(got.body, &window); err != nil || len(window.Metrics) != len(jobs) {
+				t.Fatalf("batch did not merge all job metrics: %v", err)
+			}
+		}
+	})
+}
+
+func TestClusteredSchedulerRetainsLateDataUntilSelectedAgain(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		interval := time.Minute
+		first := batchStart(time.Now(), interval).Add(interval)
+		var mu sync.Mutex
+		calls := make(map[string]int)
+		var deliveries [][]Batch
+		lateReturned := false
+		var decisions []time.Time
+		stop := startBufferedWorker(t, []Job{schedulerJob("fast", interval), schedulerJob("slow", interval)},
+			func(req *http.Request) (*http.Response, error) {
+				name := req.URL.Query().Get("query")
+				mu.Lock()
+				calls[name]++
+				call := calls[name]
+				mu.Unlock()
+				if name == "slow" && call == 1 {
+					select {
+					case <-req.Context().Done():
+						t.Error("ownership change cancelled previous batch's slow task")
+						return nil, req.Context().Err()
+					case <-time.After(90 * time.Second):
+					}
+					lateReturned = true
+				}
+				return schedulerResponse(t, false), nil
+			}, func(_ context.Context, batches []Batch) error {
+				deliveries = append(deliveries, batches)
+				return nil
+			}, quietLogger(), func(_ time.Duration, start time.Time) bool {
+				decisions = append(decisions, start)
+				return start.Equal(first) || start.Equal(first.Add(3*interval))
+			})
+		synctest.Wait()
+		time.Sleep(first.Sub(time.Now()))
+		synctest.Wait()
+		time.Sleep(interval)
+		synctest.Wait()
+		if len(deliveries) != 1 || len(deliveries[0]) != 1 || deliveries[0][0].Job != "fast" {
+			t.Fatal("batch deadline did not send already collected data")
+		}
+		time.Sleep(30 * time.Second)
+		synctest.Wait()
+		if !lateReturned || len(deliveries) != 1 {
+			t.Fatal("late result was cancelled or sent while another node owns the batch")
+		}
+		time.Sleep(30 * time.Second)
+		synctest.Wait()
+		if len(deliveries) != 1 || calls["fast"] != 1 || calls["slow"] != 1 {
+			t.Fatal("inactive node collected or sent data at the next interval")
+		}
+		time.Sleep(interval)
+		synctest.Wait()
+		if len(deliveries) != 2 || len(deliveries[1]) != 3 || len(decisions) != 4 {
+			t.Fatalf("retained result not merged on next ownership: deliveries=%v decisions=%v", deliveries, decisions)
+		}
+		retained := 0
+		for _, batch := range deliveries[1] {
+			if batch.Job == "slow" && batch.ScrapedAt.Before(first.Add(3*interval)) {
+				retained++
+			}
+		}
+		if retained != 1 {
+			t.Fatal("late batch lost or duplicated")
+		}
+		stop()
+		if len(deliveries) != 2 {
+			t.Fatal("shutdown resent already delivered data")
+		}
+	})
+}
+
+func TestClusteredSchedulerDoesNotTakeOverMidBatch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		interval := time.Minute
+		first := batchStart(time.Now(), interval).Add(interval)
+		members := []string{"a", "b"}
+		failed := batchOwner(interval, first, members)
+		survivor := "a"
+		if failed == survivor {
+			survivor = "b"
+		}
+		calls, sends, decisions := 0, 0, 0
+		startBufferedWorker(t, []Job{schedulerJob("job", interval)},
+			func(_ *http.Request) (*http.Response, error) {
+				calls++
+				return schedulerResponse(t, false), nil
+			}, func(_ context.Context, _ []Batch) error {
+				sends++
+				return nil
+			}, quietLogger(), func(interval time.Duration, start time.Time) bool {
+				decisions++
+				return batchOwner(interval, start, members) == survivor
+			})
+		synctest.Wait()
+		time.Sleep(first.Sub(time.Now()) + 10*time.Second)
+		synctest.Wait()
+		members = []string{survivor}
+		time.Sleep(49 * time.Second)
+		synctest.Wait()
+		if calls != 0 || sends != 0 || decisions != 1 {
+			t.Fatal("membership change triggered takeover of an executing batch")
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if calls != 1 || sends != 1 || decisions != 2 {
+			t.Fatal("survivor did not acquire the next batch")
+		}
+	})
+}
+
+func TestClusteredSchedulerDoesNotCancelOnOwnershipChange(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		interval := time.Minute
+		first := batchStart(time.Now(), interval).Add(interval)
+		release := make(chan struct{})
+		started := make(chan struct{}, 10)
+		var deliveries [][]Batch
+		stop := startBufferedWorker(t, []Job{schedulerJob("job", interval)},
+			func(req *http.Request) (*http.Response, error) {
+				started <- struct{}{}
+				select {
+				case <-req.Context().Done():
+					return nil, req.Context().Err()
+				case <-release:
+					return schedulerResponse(t, false), nil
+				}
+			}, func(_ context.Context, batches []Batch) error {
+				deliveries = append(deliveries, batches)
+				return nil
+			}, quietLogger(), func(_ time.Duration, start time.Time) bool {
+				// 连续选中、切换离开、再次选中时都不能重叠启动本实例的旧请求。
+				return !start.Equal(first.Add(2 * interval))
+			})
+		synctest.Wait()
+		time.Sleep(first.Sub(time.Now()) + 3*interval)
+		synctest.Wait()
+		if len(started) != 1 || len(deliveries) != 0 {
+			t.Fatal("new batch overlapped or cancelled an existing local task")
+		}
+		close(release)
+		synctest.Wait()
+		if len(deliveries) != 1 || len(deliveries[0]) != 1 {
+			t.Fatal("previous task result was not sent on current ownership")
+		}
+		stop()
+	})
 }
 
 func TestBufferedSchedulerFlushesWhenAllTasksComplete(t *testing.T) {

@@ -74,15 +74,12 @@ func startTestCluster(t *testing.T, cfg *Config) *Cluster {
 	return c
 }
 
-func startTestWorker(t *testing.T, cfg *Config, cluster *Cluster, sink Sink, batchSinks ...BatchSink) func() {
+func startTestWorker(t *testing.T, cfg *Config, cluster *Cluster, sink Sink) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	worker := New(cfg, quietLogger(), sink)
 	worker.Cluster = cluster
-	if len(batchSinks) > 0 {
-		worker.BatchSink = batchSinks[0]
-	}
 	go func() {
 		defer close(done)
 		worker.Run(ctx)
@@ -221,6 +218,90 @@ func TestRendezvousOwnershipAndMinimalMovement(t *testing.T) {
 	}
 }
 
+func TestBatchOwnershipAndAlignment(t *testing.T) {
+	interval := time.Minute
+	now := time.Date(2026, 11, 2, 15, 44, 15, 123, time.FixedZone("local", 8*60*60))
+	start := batchStart(now, interval)
+	if !start.Equal(time.Date(2026, 11, 2, 7, 44, 0, 0, time.UTC)) ||
+		!batchStart(now.UTC(), interval).Equal(start) ||
+		!batchStart(start.Add(interval), interval).Equal(start.Add(interval)) {
+		t.Fatal("batch boundary is not timezone-independent and epoch-aligned")
+	}
+	oddInterval := 7 * time.Second
+	if batchStart(now, oddInterval).UnixNano()%int64(oddInterval) != 0 {
+		t.Fatal("non-minute interval is not epoch-aligned")
+	}
+	seen := make(map[string]bool)
+	for i := range 100 {
+		at := start.Add(time.Duration(i) * interval)
+		owner := batchOwner(interval, at, []string{"a", "b"})
+		if owner == "" || owner != batchOwner(interval, at, []string{"b", "a"}) {
+			t.Fatal("batch ownership depends on member order")
+		}
+		seen[owner] = true
+	}
+	if len(seen) != 2 || batchOwner(interval, start, nil) != "" ||
+		batchOwner(interval, start, []string{"only"}) != "only" {
+		t.Fatal("batch hashing did not distribute ownership or handle membership edges")
+	}
+}
+
+func TestClusterBufferedWorkersSendOneEventPerBatch(t *testing.T) {
+	interval := time.Second
+	jobs := []Job{schedulerJob("first", interval), schedulerJob("second", interval)}
+	cfg := &Config{Jobs: jobs, EventHub: &EventHubConfig{}}
+	first := testCluster(t, cfg, "first")
+	second := testCluster(t, cfg, "second", first.list.LocalNode().Address())
+	waitFor(t, "consistent batch membership", func() bool {
+		return first.Ready() && second.Ready() && len(first.Members()) == 2 && len(second.Members()) == 2
+	})
+	type delivery struct {
+		node  string
+		start time.Time
+		count int
+	}
+	delivered := make(chan delivery, 100)
+	for _, cluster := range []*Cluster{first, second} {
+		worker := New(cfg, quietLogger(), nil)
+		worker.Cluster = cluster
+		worker.Client.Transport = schedulerTransport(func(_ *http.Request) (*http.Response, error) {
+			return schedulerResponse(t, false), nil
+		})
+		worker.BatchSink = func(ctx context.Context, batches []Batch) error {
+			if len(batches) != len(jobs) {
+				t.Errorf("node %s received %d jobs instead of %d", cluster.Name(), len(batches), len(jobs))
+				return fmt.Errorf("incomplete batch")
+			}
+			sender := &recordingSender{}
+			err := eventHubBatchSink(sender, quietLogger())(ctx, batches)
+			delivered <- delivery{node: cluster.Name(), start: batchStart(batches[0].ScrapedAt, interval), count: len(sender.bodies)}
+			return err
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			worker.Run(ctx)
+		}()
+		t.Cleanup(func() { cancel(); <-done })
+	}
+	seen := make(map[time.Time]bool)
+	timer := time.NewTimer(6 * time.Second)
+	defer timer.Stop()
+	for range 3 {
+		select {
+		case got := <-delivered:
+			if seen[got.start] || got.count != 1 ||
+				got.node != batchOwner(interval, got.start, []string{first.Name(), second.Name()}) {
+				t.Fatalf("batch was split, duplicated or sent by the wrong node: %+v", got)
+			}
+			seen[got.start] = true
+		case <-timer.C:
+			t.Fatal("cluster workers did not dispatch three complete batches")
+		}
+	}
+}
+
 func TestClusterAllowsConfigurationChanges(t *testing.T) {
 	cfg, err := ParseConfig([]byte(clusterTestConfig))
 	if err != nil {
@@ -310,13 +391,6 @@ func TestClusterLabelIsolation(t *testing.T) {
 }
 
 func TestClusterWorkerHandoffPreservesUnchangedTasks(t *testing.T) {
-	t.Run("unbuffered", func(t *testing.T) { testClusterWorkerHandoff(t, nil) })
-	t.Run("buffered", func(t *testing.T) {
-		testClusterWorkerHandoff(t, func(context.Context, []Batch) error { return nil })
-	})
-}
-
-func testClusterWorkerHandoff(t *testing.T, batchSink BatchSink) {
 	started := make(chan string, 100)
 	canceled := make(chan string, 100)
 	var mu sync.Mutex
@@ -338,7 +412,7 @@ func testClusterWorkerHandoff(t *testing.T, batchSink BatchSink) {
 	}
 	cfg := &Config{Jobs: []Job{job}}
 	first := testCluster(t, cfg, "first")
-	stopFirst := startTestWorker(t, cfg, first, DiscardSink(quietLogger()), batchSink)
+	stopFirst := startTestWorker(t, cfg, first, DiscardSink(quietLogger()))
 	defer stopFirst()
 	receive := func(channel <-chan string, count int) []string {
 		var values []string
@@ -373,7 +447,7 @@ func testClusterWorkerHandoff(t *testing.T, batchSink BatchSink) {
 			t.Fatalf("unchanged task was canceled: %s", workspace)
 		}
 	}
-	stopSecond := startTestWorker(t, cfg, second, DiscardSink(quietLogger()), batchSink)
+	stopSecond := startTestWorker(t, cfg, second, DiscardSink(quietLogger()))
 	defer stopSecond()
 	for _, workspace := range receive(started, len(moved)) {
 		if !moved[workspace] {

@@ -8,8 +8,6 @@ import (
 
 type scheduledTask struct {
 	task    Task
-	cancel  context.CancelFunc
-	done    chan struct{}
 	running bool
 }
 
@@ -20,7 +18,7 @@ type scrapeResult struct {
 	start time.Time
 }
 
-// 相同 interval 的本地任务共享汇聚进度，不等待其他周期或其他实例的任务。
+// 相同 interval 的任务作为整批分配；pending 也保留本实例尚未发送的晚到结果。
 type scrapeGroup struct {
 	interval  time.Duration
 	next      time.Time
@@ -28,13 +26,29 @@ type scrapeGroup struct {
 	completed map[string]bool
 	pending   []Batch
 	flushed   bool
+	active    bool
 }
 
 func (s *Scraper) runBufferedTasks(ctx context.Context, tasks []Task) {
+	var ownsBatch func(time.Duration, time.Time) bool
+	if s.Cluster != nil {
+		ownsBatch = func(interval time.Duration, start time.Time) bool {
+			owner := ""
+			if s.Cluster.Ready() {
+				owner = batchOwner(interval, start, s.Cluster.Members())
+			}
+			s.Logger.Info("cluster batch assigned", "node", s.Cluster.Name(),
+				"batch_start", start, "interval", interval, "owner", owner)
+			return owner == s.Cluster.Name()
+		}
+	}
+	s.runBufferedTasksWithOwner(ctx, tasks, ownsBatch)
+}
+
+func (s *Scraper) runBufferedTasksWithOwner(ctx context.Context, tasks []Task, ownsBatch func(time.Duration, time.Time) bool) {
 	// 每个任务最多一个在途请求；退出时结果仍可入队，避免等待采集退出时死锁。
 	results := make(chan scrapeResult, len(tasks))
 	groups := make(map[time.Duration]*scrapeGroup)
-	assigned := make(map[string]*scheduledTask)
 	var workers sync.WaitGroup
 
 	deliveries := make(chan []Batch)
@@ -61,7 +75,7 @@ func (s *Scraper) runBufferedTasks(ctx context.Context, tasks []Task) {
 	}
 	flushCompleted := func(group *scrapeGroup) {
 		// 空结果、失败和超时也计入完成；提前发送不改变下一次采集的计划时间。
-		if !group.flushed && len(group.completed) == len(group.tasks) {
+		if group.active && !group.flushed && len(group.completed) == len(group.tasks) {
 			flush(group)
 		}
 	}
@@ -71,10 +85,8 @@ func (s *Scraper) runBufferedTasks(ctx context.Context, tasks []Task) {
 			return
 		}
 		taskCtx, cancel := context.WithCancel(ctx)
-		task.cancel, task.done, task.running = cancel, make(chan struct{}), true
-		done := task.done
+		task.running = true
 		workers.Go(func() {
-			defer close(done)
 			defer cancel()
 			result := scrapeResult{task: task, start: time.Now()}
 			// 仅替换当前请求副本的 Sink：先返回采集结果，由调度器统一汇聚发送。
@@ -93,100 +105,61 @@ func (s *Scraper) runBufferedTasks(ctx context.Context, tasks []Task) {
 		if result.batch != nil {
 			group.pending = append(group.pending, *result.batch)
 		}
-		// 归属变更前的请求仍可贡献数据，但不能更新同 ID 新任务的运行状态。
-		if assigned[task.task.ID] == task {
-			task.running = false
-			group.completed[task.task.ID] = true
-		}
+		task.running = false
+		group.completed[task.task.ID] = true
 		if result.err != nil && ctx.Err() == nil {
 			s.Logger.Error("scrape failed", "job", task.task.Job.Name, "target", task.task.Target,
 				"workspace", workspaceFor(task.task.Job), "duration", time.Since(result.start), "error", result.err)
 		}
 		flushCompleted(group)
 	}
-	reconcile := func() {
-		// 只增删本实例归属发生变化的任务，保留其余任务的在途请求和调度进度。
-		members := []string(nil)
-		if s.Cluster != nil {
-			members = s.Cluster.Members()
+	now := time.Now()
+	for _, task := range tasks {
+		interval := time.Duration(task.Job.Interval)
+		group := groups[interval]
+		if group == nil {
+			next := now.Add(interval)
+			if ownsBatch != nil {
+				// 集群启动不补采当前批次，统一等下一时间边界，避免重启或新成员接管半批。
+				next = batchStart(now, interval).Add(interval)
+			}
+			group = &scrapeGroup{
+				interval: interval, next: next, active: ownsBatch == nil,
+				tasks: make(map[string]*scheduledTask), completed: make(map[string]bool),
+			}
+			groups[interval] = group
 		}
-		wanted := make(map[string]Task)
-		for _, task := range tasks {
-			if s.Cluster == nil || (s.Cluster.Ready() && taskOwner(task.ID, members) == s.Cluster.Name()) {
-				wanted[task.ID] = task
-			}
-		}
-		for id, task := range assigned {
-			if _, keep := wanted[id]; !keep && task.running {
-				task.cancel()
-			}
-		}
-		for id, task := range assigned {
-			if _, keep := wanted[id]; keep {
-				continue
-			}
-			for task.running {
-				// 等待移出任务退出时继续接收结果，避免结果通道满后双方互相等待。
-				select {
-				case <-task.done:
-					task.running = false
-				case result := <-results:
-					accept(result)
-				}
-			}
-			group := groups[time.Duration(task.task.Job.Interval)]
-			delete(group.tasks, id)
-			delete(group.completed, id)
-			delete(assigned, id)
-		}
-		for id, task := range wanted {
-			if _, exists := assigned[id]; exists {
-				continue
-			}
-			interval := time.Duration(task.Job.Interval)
-			group := groups[interval]
-			if group == nil {
-				group = &scrapeGroup{
-					interval: interval, next: time.Now().Add(interval),
-					tasks: make(map[string]*scheduledTask), completed: make(map[string]bool),
-				}
-				groups[interval] = group
-			}
-			runner := &scheduledTask{task: task}
-			assigned[id], group.tasks[id] = runner, runner
-			group.flushed = false
-			start(runner)
-		}
+		group.tasks[task.ID] = &scheduledTask{task: task}
+	}
+	if ownsBatch == nil {
+		s.Logger.Info("standalone tasks assigned", "tasks", len(tasks))
 		for _, group := range groups {
-			flushCompleted(group)
-		}
-		if s.Cluster == nil {
-			s.Logger.Info("standalone tasks assigned", "tasks", len(assigned))
-		} else {
-			s.Logger.Info("cluster tasks assigned", "node", s.Cluster.Name(),
-				"members", members, "ready", s.Cluster.Ready(), "tasks", len(assigned))
+			for _, task := range group.tasks {
+				start(task)
+			}
 		}
 	}
-	reconcile()
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
-	var changes <-chan struct{}
-	if s.Cluster != nil {
-		changes = s.Cluster.Changes()
-	}
 	for ctx.Err() == nil {
 		now := time.Now()
 		wait := time.Hour
 		for _, group := range groups {
 			if !now.Before(group.next) {
 				// 周期截止只发送已有数据，不取消慢请求；晚到结果留给下一批。
-				flush(group)
+				if group.active {
+					flush(group)
+				}
 				group.completed = make(map[string]bool)
 				group.flushed = false
 				// 沿原周期推进并跳过已错过的时刻，避免补跑积压请求或累计时间漂移。
 				group.next = group.next.Add((now.Sub(group.next)/group.interval + 1) * group.interval)
-				for _, task := range group.tasks {
-					start(task)
+				// 仅在新批次读取成员视图；成员变化不取消旧请求，也不接管执行中的批次。
+				group.active = ownsBatch == nil || ownsBatch(group.interval, group.next.Add(-group.interval))
+				if group.active {
+					for _, task := range group.tasks {
+						start(task)
+					}
 				}
 			}
 			if remaining := group.next.Sub(now); remaining < wait {
@@ -202,8 +175,6 @@ func (s *Scraper) runBufferedTasks(ctx context.Context, tasks []Task) {
 		}
 		select {
 		case <-ctx.Done():
-		case <-changes:
-			reconcile()
 		case result := <-results:
 			accept(result)
 		case output <- next:
@@ -213,11 +184,6 @@ func (s *Scraper) runBufferedTasks(ctx context.Context, tasks []Task) {
 		}
 	}
 	// 退出时才取消在途采集；等待其退出并收齐已产生的结果后，再汇聚剩余数据。
-	for _, task := range assigned {
-		if task.running {
-			task.cancel()
-		}
-	}
 	workers.Wait()
 	for len(results) > 0 {
 		accept(<-results)
