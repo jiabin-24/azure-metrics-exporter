@@ -11,7 +11,7 @@ import (
 
 const (
 	azureResourceLookupTimeout = 30 * time.Second
-	azureResourceWaitTimeout   = 5 * time.Second
+	azureResourceWaitTimeout   = 10 * time.Second
 )
 
 var azureResourceLookups azureResourceLookupGroup

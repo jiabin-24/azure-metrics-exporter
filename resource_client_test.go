@@ -135,8 +135,8 @@ func TestAzureResourceClientDirectLookupCacheAndCoalescing(t *testing.T) {
 }
 
 func TestAzureResourceClientWarmsCacheAfterEnrichmentWaitTimeout(t *testing.T) {
-	if azureResourceWaitTimeout != 5*time.Second || azureResourceLookupTimeout != 30*time.Second {
-		t.Fatal("enrichment wait and shared lookup limits must be 5s and 30s respectively")
+	if azureResourceWaitTimeout != 10*time.Second || azureResourceLookupTimeout != 30*time.Second {
+		t.Fatal("enrichment wait and shared lookup limits must be 10s and 30s respectively")
 	}
 	var providerCalls, resourceCalls atomic.Int32
 	started := make(chan struct{}, 1)
