@@ -8,7 +8,7 @@
 
 ### 1. 启动 exporter
 
-按[项目配置](../GUIDE.md#configuration)设置 Azure 身份，授予各 workspace 的 `Monitoring Data Reader` 权限。需要自动补充资源区域时，还需具有对应 Azure 资源的读取权限。
+为运行 exporter 的 Entra ID App 授予各 workspace 的 `Monitoring Data Reader` 权限。需要自动补充资源区域时，还需具有对应 Azure 资源的读取权限。
 
 修改 [workspace 配置文件](../config/prometheus-workspaces.yaml)，填写真实查询终结点：
 
@@ -27,7 +27,9 @@ go run . --server.timeout.write=120s
 
 ### 2. 启动 scraper
 
-统一使用 [scraper.yaml](scraper.yaml)，默认配置面向 Kubernetes。修改其中的 Event Hub namespace、name；本地单实例启动时，将 `&exporter_targets` 定义的地址改为 `127.0.0.1:8080`，并移除或注释整个 `cluster` 配置。改回 Kubernetes 部署前，恢复 `azure-metrics:8080` 和 memberlist 配置。
+统一使用 [scraper.yaml](scraper.yaml)。修改其中的 Event Hub namespace、name。
+- 本地单实例启动时，将 `&exporter_targets` 定义的地址改为 `127.0.0.1:8080`，并移除或注释整个 memberlist `cluster` 配置
+- 改回 Kubernetes 部署前，恢复 `azure-metrics:8080` 和 memberlist 配置。
 
 在第二个终端输入具有 **Send** 权限的 SAS 连接字符串并启动：
 
@@ -37,7 +39,7 @@ $env:AZURE_EVENTHUB_CONNECTION_STRING = [System.Net.NetworkCredential]::new("", 
 go run .\scraper\cmd\metrics-scraper --config.file=.\scraper\scraper.yaml --web.listen-address=:8081
 ```
 
-连接字符串的 namespace 必须与配置一致，并包含 `EntityPath=<event_hub.name>`。缺少时追加，不要重复填写或将密钥提交到仓库。
+连接字符串的 namespace 必须与配置一致，并包含 `;EntityPath=<event_hub.name>`。缺少时追加，不要重复填写或将密钥提交到仓库。
 
 仅调试采集时可移除 `event_hub` 配置；此时数据会被丢弃，不发送、不落盘。
 
@@ -67,19 +69,9 @@ Invoke-WebRequest "http://127.0.0.1:8081/readyz"
 | `params.format` | 发送到 Event Hub 时使用 `["json"]` |
 | `static_configs.labels` | 静态元数据，例如 `cluster`、`region` |
 
-### 时间戳语义
-
-scraper 始终保留 exporter 返回的指标时间戳，不替换为 scraper 的本次抓取时间。`honor_timestamps: true`（默认）保持现有逻辑：PromQL 独立原始指标选择器使用源样本时间，计算表达式使用查询求值时间；平台指标使用 Azure 聚合时间桶的时间。
-
-范围查询的一次响应包含多个历史点，若全部改成本次抓取时间，会丢失各点的时间关系。`rolling_range.step` 只对齐查询求值网格，不保证源样本时间对齐。
-
-`honor_timestamps: false` 让 PromQL exporter 不再用源时间替换上游响应的时间戳。普通范围查询的每个点保留自身求值时间；滚动查询配置 `step: 15s` 时落在每分钟 `00/15/30/45`，`delay` 在确定查询范围时生效。缺失点不补齐，不按点数倒推，不插值；重复值仍可出现在不同求值时刻。即时查询使用实际求值时间（含 `time` 或 `query_delay`），不自动对齐到 step。即时查询返回的原始范围向量仍携带原始样本时间，见 [PromQL 文档](../PROMQL.md#采样时间默认启用)。
-
-这个选项不同于标准 Prometheus 的同名配置：`false` 不是将历史点统一打上本次抓取时间。请在 `global` 或 job 中设置，不要填写 `params.honor_timestamps`。非 PromQL job 不支持 `false`；全局设为 `false` 时，这些 job 必须覆盖为 `true`。Event Hub 的 `windowStart/windowEnd` 仍表示实际返回样本的最早/最晚时间，不保证等于请求边界。
-
 ### PromQL JSON 采集
 
-每个任务自动采集全部已配置的 workspace，不要填写 `workspaces` 或 `params.workspace`。
+每个任务自动采集全部已配置的 workspace。
 
 ```yaml
 global:
@@ -100,16 +92,14 @@ scrape_configs:
       - targets: &exporter_targets ["127.0.0.1:8080"]
 ```
 
-其他任务使用 `targets: *exporter_targets` 复用地址。输出缺少 `cluster` 时，须在静态 `labels` 中补充；也可填写 `region`。
-
-聚合查询的 `by (...)` 须保留源资源 ID 和已有 `region` / `location`，否则聚合会丢弃这些标签，exporter 无法按资源查询真实区域。默认 API Server 查询兼容 `"microsoft.resourceid"`（带点的标签名须加双引号）、`microsoft_resourceid` 和 `resourceID`；缺失的标签不会生成值。错误比例分子、分母须使用相同分组。不同资源或区域会分别聚合；同 cluster 多资源时，序列数可能增加，不再混合计算。
-
-自定义静态标签示例（可选，不包含在默认配置中）：
+其他任务使用 `targets: *exporter_targets` 复用地址。输出缺少 `cluster` 时，须在静态 `labels` 中补充；缺少区域信息时，也可通过静态 `region` 提供兜底值。自定义静态标签示例（可选，不包含在默认配置中）：
 
 ```yaml
 static_configs:
   - targets: ["127.0.0.1:8080"]
     labels:
+      cluster: aks-prod
+      region: eastasia
       environment: development
 ```
 
@@ -128,7 +118,7 @@ static_configs:
 
 ### 平台指标 JSON 采集
 
-参考 [scraper.yaml](scraper.yaml) 中的平台任务注释，填写订阅、资源、指标及 `format: ["json"]`，可与 PromQL 共用 Event Hub。参数见[平台指标文档](../GUIDE.md#platform-window-json)。
+参考 [scraper.yaml](scraper.yaml) 中的平台任务注释，填写订阅、资源、指标及 `format: ["json"]`，可与 PromQL 共用 Event Hub。参数见[平台指标文档](../ARCHITECTURE.md#platform-window-json)。
 
 ## 多 workspace 与 memberlist 分片
 
@@ -145,32 +135,6 @@ cluster:
 - 实例间双向放行 **TCP/UDP 7946**，必要时设置 `advertise_address`。
 - 可用 `SCRAPER_CLUSTER_NODE_NAME`、`SCRAPER_CLUSTER_BIND_ADDRESS`、`SCRAPER_CLUSTER_ADVERTISE_ADDRESS`、`SCRAPER_CLUSTER_JOIN` 覆盖配置；多个种子用逗号分隔。
 - 非可信网络设置所有实例共用的 `SCRAPER_CLUSTER_SECRET_KEY`，使用 base64 编码的 16、24 或 32 字节 AES 密钥。
-
-## Docker Compose
-
-镜像发布工作流会同时构建并推送 `niuai/azure-metrics-scraper`，支持 `linux/amd64` 和 `linux/arm64`，标签规则与 exporter 一致。每次构建共用一个 UTC 日期标签 `YYYYMMDD-HHmmss-<run_id>-<run_attempt>`，避免重复构建覆盖；原有标签仍保留。发布后可使用 `niuai/azure-metrics-scraper:<tag>`，建议选择实际构建生成的日期标签或固定 digest，不要依赖节点缓存中的 `:main`。
-
-也可在本地构建镜像：
-
-```powershell
-docker build -f .\scraper\Dockerfile -t azure-metrics-scraper:local .
-```
-
-在配置中启用 `cluster: {}`，将 exporter 地址改为容器可访问的地址。将以下片段加入仓库根目录的 Compose 文件，并确保与 exporter 网络互通：
-
-```yaml
-services:
-  scraper:
-    image: azure-metrics-scraper:local
-    command: ["--config.file=/etc/scraper.yaml"]
-    volumes:
-      - ./scraper/scraper.yaml:/etc/scraper.yaml:ro
-    environment:
-      AZURE_EVENTHUB_CONNECTION_STRING: ${AZURE_EVENTHUB_CONNECTION_STRING:?Set the Event Hub connection string}
-      SCRAPER_CLUSTER_JOIN: "scraper:7946"
-```
-
-设置连接字符串后运行 `docker compose up -d --scale scraper=2`。不要设置固定 `container_name`。
 
 ## Kubernetes 部署
 
