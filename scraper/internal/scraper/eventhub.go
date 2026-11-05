@@ -14,6 +14,7 @@ import (
 
 	"azure-metrics-exporter/config"
 	"azure-metrics-exporter/internal/metricdata"
+
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azeventhubs/v2"
 )
 
