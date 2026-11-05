@@ -97,7 +97,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: azure-metrics-scraper
+            name: scraper-configs
 ---
 apiVersion: v1
 kind: Service

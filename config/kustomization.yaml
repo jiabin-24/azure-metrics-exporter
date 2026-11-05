@@ -5,6 +5,6 @@ generatorOptions:
   disableNameSuffixHash: true
 
 configMapGenerator:
-  - name: azure-metrics-exporter
+  - name: exporter-configs
     files:
       - workspaces.yaml=prometheus-workspaces.yaml

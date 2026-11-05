@@ -134,7 +134,7 @@ scraper 不持久化数据，也不是补采队列；重启或多实例成员收
 
 ## 4. 更新配置
 
-修改 workspace 或采集配置源文件后，使用 `-k` 重新部署（不要使用 `-f .\deploy\`）。生成的 ConfigMap 使用固定名称 `azure-metrics-exporter` 和 `azure-metrics-scraper`。更新 ConfigMap 不会自动触发 Deployment 滚动更新，需要手动重启对应服务。Secret 引用保持原名。
+修改 workspace 或采集配置源文件后，使用 `-k` 重新部署（不要使用 `-f .\deploy\`）。生成的 ConfigMap 使用固定名称 `exporter-configs` 和 `scraper-configs`。更新 ConfigMap 不会自动触发 Deployment 滚动更新，需要手动重启对应服务。Secret 引用保持原名。
 
 仅修改采集配置时，重新应用后重启 scraper：
 

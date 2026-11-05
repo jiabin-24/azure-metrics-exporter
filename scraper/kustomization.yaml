@@ -5,6 +5,6 @@ generatorOptions:
   disableNameSuffixHash: true
 
 configMapGenerator:
-  - name: azure-metrics-scraper
+  - name: scraper-configs
     files:
       - scraper.yaml

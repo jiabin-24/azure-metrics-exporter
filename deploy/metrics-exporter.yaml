@@ -82,7 +82,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: azure-metrics-exporter
+            name: exporter-configs
 ---
 apiVersion: v1
 kind: Service
