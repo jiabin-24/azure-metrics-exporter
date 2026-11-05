@@ -16,8 +16,8 @@ cluster:
   join: ["azure-metrics-scraper-gossip:7946"]
 
 event_hub:
-  namespace: shein-aks-metrics.servicebus.windows.net
-  name: shein-aks-metrics
+  namespace: ${AZURE_EVENTHUB_NAMESPACE}
+  name: ${AZURE_EVENTHUB_NAME}
 
 scrape_configs:
   - job_name: apiserver_request_rate_by_code

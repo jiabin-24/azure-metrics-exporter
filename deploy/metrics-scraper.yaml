@@ -47,6 +47,16 @@ spec:
                 secretKeyRef:
                   name: azure-metrics-eventhub
                   key: connection-string
+            - name: AZURE_EVENTHUB_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: azure-metrics-eventhub
+                  key: namespace
+            - name: AZURE_EVENTHUB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: azure-metrics-eventhub
+                  key: name
           ports:
             - name: health
               containerPort: 8081

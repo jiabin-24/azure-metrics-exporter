@@ -199,6 +199,8 @@ func ParseConfig(data []byte) (*Config, error) {
 		}
 	}
 	if cfg.EventHub != nil {
+		cfg.EventHub.Namespace = os.ExpandEnv(cfg.EventHub.Namespace)
+		cfg.EventHub.Name = os.ExpandEnv(cfg.EventHub.Name)
 		if !regexp.MustCompile(`^[a-zA-Z0-9-]+\.servicebus\.windows\.net$`).MatchString(cfg.EventHub.Namespace) ||
 			!regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`).MatchString(cfg.EventHub.Name) {
 			return nil, fmt.Errorf("event_hub requires a servicebus.windows.net namespace hostname and a valid hub name")

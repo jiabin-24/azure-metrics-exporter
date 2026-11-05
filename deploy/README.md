@@ -64,14 +64,14 @@ Azure Monitor workspace <- exporter (azure-metrics:8080) <- scraper -> Azure Eve
 ## 1. 修改配置
 
 1. 在 [workspace 配置](../config/prometheus-workspaces.yaml) 中填写真实的 workspace Prometheus 查询终结点；可增加多个 workspace。此文件同时用于本地运行和 Kubernetes ConfigMap 生成，无需在部署清单中重复维护。
-2. 在唯一的 [采集配置](../scraper/scraper.yaml) 中确认 `event_hub.namespace`、`event_hub.name`、PromQL 查询及静态标签（例如将 `environment: development` 改为实际环境）。保持目标地址 `azure-metrics:8080` 与 exporter Service 一致，并保留默认的 memberlist 配置。
+2. 在唯一的 [采集配置](../scraper/scraper.yaml) 中确认 PromQL 查询及静态标签（例如将 `environment: development` 改为实际环境）。Event Hub namespace 和 name 保留环境变量占位符，由下文的 Kubernetes ConfigMap 注入。保持目标地址 `azure-metrics:8080` 与 exporter Service 一致，并保留默认的 memberlist 配置。
 3. 部署前，将 [exporter 清单](metrics-exporter.yaml) 和 [scraper 清单](metrics-scraper.yaml) 中的 `image` 分别更新为 [构建镜像](#构建镜像) 章节发布的镜像地址，包含对应的版本标签。
 4. 若 Azure Monitor 存在入库延迟，调整 `rolling_range.delay`；抓取较慢时同时调整 `scrape_timeout` 和 exporter 的写超时，前者不得超过 `scrape_interval`。
 
 - exporter 使用服务主体认证。该身份需要各 workspace 的 **Monitoring Data Reader** 权限；如需补充资源区域，还需对应资源的读取权限。
 - scraper 单独使用具有 **Send** 权限的 Event Hub SAS 连接字符串，其 namespace、hub 名必须与实际一致，且必须包含 `;EntityPath=<event_hub.name>`。
 
-## 2. 在 Kubernetes（AKS）中创建 namespace 和 Secret
+## 2. 在 Kubernetes（AKS）中创建 namespace、ConfigMap 和 Secret
 
 首次连接 AKS 时，使用 `az aks get-credentials` 获取集群凭据并配置本地 kubectl 上下文；后续操作前，确认当前上下文指向目标集群。
 
@@ -99,6 +99,16 @@ $clientSecret = Read-Host "Azure client secret" -AsSecureString
 } | ConvertTo-Json -Depth 5 | kubectl apply -f -
 Remove-Variable clientSecret
 
+@{
+    apiVersion = "v1"
+    kind = "ConfigMap"
+    metadata = @{ name = "azure-metrics-eventhub"; namespace = $namespace }
+    data = @{
+        "namespace" = (Read-Host "Event Hub namespace hostname (e.g. example.servicebus.windows.net)")
+        "name" = (Read-Host "Event Hub name")
+    }
+} | ConvertTo-Json -Depth 5 | kubectl apply -f -
+
 $connectionString = Read-Host "Event Hub SAS connection string" -AsSecureString
 @{
     apiVersion = "v1"
@@ -111,6 +121,8 @@ $connectionString = Read-Host "Event Hub SAS connection string" -AsSecureString
 } | ConvertTo-Json -Depth 5 | kubectl apply -f -
 Remove-Variable connectionString
 ```
+
+Event Hub 的 namespace、name 保存在 `azure-metrics-eventhub` ConfigMap 中，连接字符串保存在同名 Secret 中，分别以 `AZURE_EVENTHUB_NAMESPACE`、`AZURE_EVENTHUB_NAME` 和 `AZURE_EVENTHUB_CONNECTION_STRING` 环境变量注入 scraper。更新已有部署时，需创建上述 ConfigMap，并使用包含环境变量解析支持的新 scraper 镜像；更新 ConfigMap 或 Secret 后需重启 scraper 才能生效。
 
 使用 AKS 默认网络配置且未额外限制出站流量时，以下通信通常已连通，无需额外放行；如配置了 NetworkPolicy、NSG、防火墙或私有端点，则需确认允许 scraper 到 exporter 的 TCP 8080、scraper 副本间双向 TCP/UDP 7946、DNS，以及到 Event Hubs 的 TCP 5671 和到 Azure 身份、Monitor、Resource Manager 端点的 HTTPS 443。
 

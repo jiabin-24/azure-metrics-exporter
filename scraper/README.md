@@ -27,19 +27,23 @@ go run . --server.timeout.write=120s
 
 ### 2. 启动 scraper
 
-统一使用 [scraper.yaml](scraper.yaml)。修改其中的 Event Hub namespace、name。
+统一使用 [scraper.yaml](scraper.yaml)。Event Hub namespace、name 通过环境变量提供，无需在文件中填写实际值。
 - 本地单实例启动时，将 `&exporter_targets` 定义的地址改为 `127.0.0.1:8080`，并移除或注释整个 memberlist `cluster` 配置
 - 改回 Kubernetes 部署前，恢复 `azure-metrics:8080` 和 memberlist 配置。
 
 在第二个终端输入具有 **Send** 权限的 SAS 连接字符串并启动：
 
 ```powershell
+$env:AZURE_EVENTHUB_NAMESPACE = Read-Host "Event Hub namespace hostname (e.g. example.servicebus.windows.net)"
+$env:AZURE_EVENTHUB_NAME = Read-Host "Event Hub name"
 $secret = Read-Host "Event Hub SAS connection string" -AsSecureString
 $env:AZURE_EVENTHUB_CONNECTION_STRING = [System.Net.NetworkCredential]::new("", $secret).Password
 go run .\scraper\cmd\metrics-scraper --config.file=.\scraper\scraper.yaml --web.listen-address=:8081
 ```
 
 连接字符串的 namespace 必须与配置一致，并包含 `;EntityPath=<event_hub.name>`。缺少时追加，不要重复填写或将密钥提交到仓库。
+
+`event_hub.namespace` 和 `event_hub.name` 支持 `${环境变量名}` 占位符，也兼容直接填写值；变量缺失、为空或展开后的值无效时，启动报配置错误。仅这两个字段支持环境变量展开，不会替换 PromQL 等其他配置中的 `$`。
 
 仅调试采集时可移除 `event_hub` 配置；此时数据会被丢弃，不发送、不落盘。
 
@@ -138,6 +142,6 @@ cluster:
 
 ## Kubernetes 部署
 
-部署文件统一位于仓库根目录的 [deploy](../deploy/README.md)，包含 exporter 和 scraper 两个服务。按[部署指南](../deploy/README.md)配置 workspace、Azure 身份和 Event Hub Secret，然后一次性部署，实现定时采集并推送到 Event Hub。
+部署文件统一位于仓库根目录的 [deploy](../deploy/README.md)，包含 exporter 和 scraper 两个服务。按[部署指南](../deploy/README.md)配置 workspace、Azure 身份、Event Hub ConfigMap（namespace、name）和 Secret（连接字符串），然后一次性部署，实现定时采集并推送到 Event Hub。
 
 scraper 的采集参数统一位于 [scraper.yaml](scraper.yaml)，调整 [metrics-scraper.yaml](../deploy/metrics-scraper.yaml) 中 Deployment 的 `replicas` 可修改副本数。
