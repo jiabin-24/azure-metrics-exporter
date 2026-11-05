@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"azure-metrics-exporter/internal/requestgroup"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
-	"github.com/jiabin-24/azure-metrics-exporter/internal/requestgroup"
 )
 
 const (

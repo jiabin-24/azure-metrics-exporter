@@ -10,8 +10,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/jiabin-24/azure-metrics-exporter/config"
-	"github.com/jiabin-24/azure-metrics-exporter/metrics"
+	"azure-metrics-exporter/config"
+	"azure-metrics-exporter/metrics"
 )
 
 func probeMetricsSubscriptionHandler(w http.ResponseWriter, r *http.Request) {

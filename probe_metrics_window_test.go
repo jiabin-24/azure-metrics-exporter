@@ -15,9 +15,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/webdevops/go-common/log/slogger"
 
-	"github.com/jiabin-24/azure-metrics-exporter/config"
-	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
-	"github.com/jiabin-24/azure-metrics-exporter/metrics"
+	"azure-metrics-exporter/config"
+	"azure-metrics-exporter/internal/metricdata"
+	"azure-metrics-exporter/metrics"
 )
 
 func TestPlatformHandlersWindowAndDefaultCompatibility(t *testing.T) {

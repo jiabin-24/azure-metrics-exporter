@@ -15,7 +15,7 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 
-	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
+	"azure-metrics-exporter/internal/metricdata"
 )
 
 const MaxBodyBytes = 16 << 20

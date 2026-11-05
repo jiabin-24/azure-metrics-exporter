@@ -17,7 +17,7 @@ import (
 	"github.com/webdevops/go-common/azuresdk/armclient"
 	"github.com/webdevops/go-common/utils/to"
 
-	"github.com/jiabin-24/azure-metrics-exporter/config"
+	"azure-metrics-exporter/config"
 )
 
 const (

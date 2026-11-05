@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
+	"azure-metrics-exporter/internal/metricdata"
 )
 
 func TestEventHubBatchSinkMergesJobs(t *testing.T) {

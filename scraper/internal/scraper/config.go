@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jiabin-24/azure-metrics-exporter/config"
-	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
+	"azure-metrics-exporter/config"
+	"azure-metrics-exporter/internal/metricdata"
 	"go.yaml.in/yaml/v2"
 )
 

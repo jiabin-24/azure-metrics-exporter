@@ -20,7 +20,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/webdevops/go-common/log/slogger"
 
-	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
+	"azure-metrics-exporter/internal/metricdata"
 )
 
 type promQLWindowCredential struct{}

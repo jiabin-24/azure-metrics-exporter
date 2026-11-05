@@ -6,7 +6,7 @@ FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 RUN apk upgrade --no-cache --force
 RUN apk add --update build-base make git
 
-WORKDIR /go/src/github.com/jiabin-24/azure-metrics-exporter
+WORKDIR /go/src/azure-metrics-exporter
 
 # Dependencies
 COPY go.mod go.sum .
@@ -24,7 +24,7 @@ RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} make build
 FROM gcr.io/distroless/static AS test
 USER 0:0
 WORKDIR /app
-COPY --from=build /go/src/github.com/jiabin-24/azure-metrics-exporter/azure-metrics-exporter .
+COPY --from=build /go/src/azure-metrics-exporter/azure-metrics-exporter .
 RUN ["./azure-metrics-exporter", "--help"]
 
 #############################################

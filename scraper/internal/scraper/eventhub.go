@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"azure-metrics-exporter/config"
+	"azure-metrics-exporter/internal/metricdata"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azeventhubs/v2"
-	"github.com/jiabin-24/azure-metrics-exporter/config"
-	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
 )
 
 const eventBodyLimit = 200 * 1024

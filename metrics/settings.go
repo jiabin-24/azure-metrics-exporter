@@ -9,8 +9,8 @@ import (
 
 	iso8601 "github.com/channelmeter/iso8601duration"
 
-	"github.com/jiabin-24/azure-metrics-exporter/config"
-	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
+	"azure-metrics-exporter/config"
+	"azure-metrics-exporter/internal/metricdata"
 )
 
 const (

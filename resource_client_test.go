@@ -22,7 +22,7 @@ import (
 	"github.com/patrickmn/go-cache"
 	"github.com/webdevops/go-common/azuresdk/armclient"
 
-	"github.com/jiabin-24/azure-metrics-exporter/internal/requestgroup"
+	"azure-metrics-exporter/internal/requestgroup"
 )
 
 const testAzureResourceID = "/subscriptions/sub/resourcegroups/rg/providers/microsoft.containerservice/managedclusters/aks"

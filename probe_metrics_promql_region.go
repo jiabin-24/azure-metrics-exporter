@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jiabin-24/azure-metrics-exporter/internal/requestgroup"
+	"azure-metrics-exporter/internal/requestgroup"
 )
 
 type promQLRegionEnricher struct {
