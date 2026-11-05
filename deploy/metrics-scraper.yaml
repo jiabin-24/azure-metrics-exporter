@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: scraper
-          image: niuai/azure-metrics-scraper:20261105-035522-41964520133-1
+          image: niuai/azure-metrics-scraper:20261105-083157-41995145616-1
           imagePullPolicy: IfNotPresent
           command: ["/azure-metrics-scraper"]
           args:
