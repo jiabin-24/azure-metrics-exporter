@@ -53,6 +53,14 @@ Azure Monitor workspace <- exporter (azure-metrics:8080) <- scraper -> Azure Eve
 
 以下 PowerShell 命令均在仓库根目录执行。需要可访问的 Kubernetes 集群、已发布的镜像、Azure Monitor workspace 和 Event Hub。
 
+## 在 Entra ID 中创建应用并赋予权限
+
+1. 在 Azure Portal 打开 **Microsoft Entra ID → 应用注册 → 新注册**，填写应用名称，选择“仅此组织目录中的帐户”，无需配置重定向 URI。
+2. 注册后，在“概述”中记录 **应用程序（客户端）ID** 和 **目录（租户）ID**；在 **证书和密码 → 客户端密码 → 新客户端密码** 中创建密码，立即安全保存密码的**值**，供后续创建 Kubernetes Secret 使用，不要提交到仓库。
+3. 打开每个目标 **Azure Monitor workspace → 访问控制（IAM）→ 添加角色分配**，选择 **Monitoring Data Reader**，将访问权限分配给刚创建的应用对应的服务主体。如需补充资源区域，再在对应资源或资源组范围授予 **Reader**。
+
+以上是 Azure 资源的 RBAC 授权，无需在应用注册的“API 权限”中添加 Microsoft Graph 权限。Event Hub 仍使用下文单独配置的 SAS 连接字符串。
+
 ## 1. 修改配置
 
 1. 在 [workspace 配置](../config/prometheus-workspaces.yaml) 中填写真实的 workspace Prometheus 查询终结点；可增加多个 workspace。此文件同时用于本地运行和 Kubernetes ConfigMap 生成，无需在部署清单中重复维护。
