@@ -12,6 +12,7 @@ import (
 
 	"azure-metrics-exporter/config"
 	"azure-metrics-exporter/internal/metricdata"
+
 	"go.yaml.in/yaml/v2"
 )
 

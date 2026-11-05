@@ -17,6 +17,7 @@ import (
 
 	"azure-metrics-exporter/internal/metricdata"
 	"azure-metrics-exporter/internal/requestgroup"
+
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 )
 
