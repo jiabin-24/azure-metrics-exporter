@@ -20,8 +20,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 
-	"github.com/webdevops/azure-metrics-exporter/config"
-	"github.com/webdevops/azure-metrics-exporter/internal/metricdata"
+	"github.com/jiabin-24/azure-metrics-exporter/config"
+	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
 )
 
 const (

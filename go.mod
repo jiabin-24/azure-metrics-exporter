@@ -1,4 +1,4 @@
-module github.com/webdevops/azure-metrics-exporter
+module github.com/jiabin-24/azure-metrics-exporter
 
 go 1.25.0
 

@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/webdevops/azure-metrics-exporter/scraper/internal/scraper"
+	"github.com/jiabin-24/azure-metrics-exporter/scraper/internal/scraper"
 )
 
 func main() {

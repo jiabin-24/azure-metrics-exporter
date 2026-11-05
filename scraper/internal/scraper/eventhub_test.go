@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webdevops/azure-metrics-exporter/internal/metricdata"
+	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
 )
 
 type recordingSender struct {

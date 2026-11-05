@@ -14,9 +14,9 @@ import (
 	"github.com/patrickmn/go-cache"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/webdevops/azure-metrics-exporter/config"
-	"github.com/webdevops/azure-metrics-exporter/internal/metricdata"
-	"github.com/webdevops/azure-metrics-exporter/metrics"
+	"github.com/jiabin-24/azure-metrics-exporter/config"
+	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
+	"github.com/jiabin-24/azure-metrics-exporter/metrics"
 )
 
 func TestScrapePlatformWindowEndToEnd(t *testing.T) {

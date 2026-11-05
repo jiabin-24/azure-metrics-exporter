@@ -10,7 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/webdevops/azure-metrics-exporter/internal/metricdata"
+	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
 )
 
 func (l *MetricList) window() metricdata.Window {

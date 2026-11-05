@@ -15,11 +15,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Setup runner
-        uses: webdevops/setup-runner@main
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761
+        with:
+          swap-size-gb: 12
 
       - name: Setup go
-        uses: webdevops/setup-go@main
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+          check-latest: true
+
+      - name: Vendor dependencies
+        run: go mod vendor
 
       - name: Run Golangci lint
         uses: golangci/golangci-lint-action@v9
@@ -61,11 +70,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Setup runner
-        uses: webdevops/setup-runner@main
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761
+        with:
+          swap-size-gb: 12
 
       - name: Setup go
-        uses: webdevops/setup-go@main
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+          check-latest: true
+
+      - name: Vendor dependencies
+        run: go mod vendor
 
       - name: Docker meta
         id: docker_meta

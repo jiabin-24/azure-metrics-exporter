@@ -13,7 +13,7 @@ import (
 	"github.com/patrickmn/go-cache"
 	"github.com/webdevops/go-common/azuresdk/armclient"
 
-	"github.com/webdevops/azure-metrics-exporter/internal/requestgroup"
+	"github.com/jiabin-24/azure-metrics-exporter/internal/requestgroup"
 )
 
 type azureResourceClient struct {

@@ -8,6 +8,8 @@
 
 以下 PowerShell 命令在仓库根目录执行，需要安装 Go（版本见 [go.mod](go.mod)）和 Azure CLI。
 
+本仓库的 Go 模块路径为 `github.com/jiabin-24/azure-metrics-exporter`；第三方 `github.com/webdevops/go-common` 仍使用上游依赖。
+
 ### 1. Azure 登录
 
 ```powershell

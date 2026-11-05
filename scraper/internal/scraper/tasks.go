@@ -12,7 +12,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/webdevops/azure-metrics-exporter/config"
+	"github.com/jiabin-24/azure-metrics-exporter/config"
 )
 
 type Task struct {

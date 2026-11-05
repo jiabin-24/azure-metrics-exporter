@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webdevops/azure-metrics-exporter/internal/metricdata"
+	"github.com/jiabin-24/azure-metrics-exporter/internal/metricdata"
 )
 
 const platformResourceID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm"

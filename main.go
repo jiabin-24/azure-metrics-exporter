@@ -21,7 +21,7 @@ import (
 	"github.com/webdevops/go-common/azuresdk/azidentity"
 	"github.com/webdevops/go-common/azuresdk/prometheus/tracing"
 
-	"github.com/webdevops/azure-metrics-exporter/config"
+	"github.com/jiabin-24/azure-metrics-exporter/config"
 )
 
 const UserAgent = "azure-metrics-exporter/"
