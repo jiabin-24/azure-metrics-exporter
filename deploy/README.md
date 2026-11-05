@@ -89,40 +89,32 @@ $clientSecret = Read-Host "Azure client secret" -AsSecureString
 @{
     apiVersion = "v1"
     kind = "Secret"
-    metadata = @{ name = "azure-metrics-exporter"; namespace = $namespace }
+    metadata = @{ name = "exporter-secrets"; namespace = $namespace }
     type = "Opaque"
     stringData = @{
-        "tenant-id" = (Read-Host "Azure tenant ID")
-        "client-id" = (Read-Host "Azure client ID")
-        "client-secret" = [System.Net.NetworkCredential]::new("", $clientSecret).Password
+        "AZURE_TENANT_ID" = (Read-Host "Azure tenant ID")
+        "AZURE_CLIENT_ID" = (Read-Host "Azure client ID")
+        "AZURE_CLIENT_SECRET" = [System.Net.NetworkCredential]::new("", $clientSecret).Password
     }
 } | ConvertTo-Json -Depth 5 | kubectl apply -f -
 Remove-Variable clientSecret
-
-@{
-    apiVersion = "v1"
-    kind = "ConfigMap"
-    metadata = @{ name = "azure-metrics-eventhub"; namespace = $namespace }
-    data = @{
-        "namespace" = (Read-Host "Event Hub namespace hostname (e.g. example.servicebus.windows.net)")
-        "name" = (Read-Host "Event Hub name")
-    }
-} | ConvertTo-Json -Depth 5 | kubectl apply -f -
 
 $connectionString = Read-Host "Event Hub SAS connection string" -AsSecureString
 @{
     apiVersion = "v1"
     kind = "Secret"
-    metadata = @{ name = "azure-metrics-eventhub"; namespace = $namespace }
+    metadata = @{ name = "scraper-secrets"; namespace = $namespace }
     type = "Opaque"
     stringData = @{
-        "connection-string" = [System.Net.NetworkCredential]::new("", $connectionString).Password
+        "AZURE_EVENTHUB_CONNECTION_STRING" = [System.Net.NetworkCredential]::new("", $connectionString).Password
+        "AZURE_EVENTHUB_NAMESPACE" = (Read-Host "Event Hub namespace hostname (e.g. example.servicebus.windows.net)")
+        "AZURE_EVENTHUB_NAME" = (Read-Host "Event Hub name")
     }
 } | ConvertTo-Json -Depth 5 | kubectl apply -f -
 Remove-Variable connectionString
 ```
 
-Event Hub 的 namespace、name 保存在 `azure-metrics-eventhub` ConfigMap 中，连接字符串保存在同名 Secret 中，分别以 `AZURE_EVENTHUB_NAMESPACE`、`AZURE_EVENTHUB_NAME` 和 `AZURE_EVENTHUB_CONNECTION_STRING` 环境变量注入 scraper。更新已有部署时，需创建上述 ConfigMap，并使用包含环境变量解析支持的新 scraper 镜像；更新 ConfigMap 或 Secret 后需重启 scraper 才能生效。
+Event Hub 的连接字符串、namespace 和 name 统一保存在 `scraper-secrets` Secret 中，键名分别为 `AZURE_EVENTHUB_CONNECTION_STRING`、`AZURE_EVENTHUB_NAMESPACE` 和 `AZURE_EVENTHUB_NAME`，并以同名环境变量注入 scraper。更新已有部署时，需先在相同命名空间创建此 Secret，再应用新的 scraper 清单；更新 Secret 后需重启 scraper 才能生效。
 
 使用 AKS 默认网络配置且未额外限制出站流量时，以下通信通常已连通，无需额外放行；如配置了 NetworkPolicy、NSG、防火墙或私有端点，则需确认允许 scraper 到 exporter 的 TCP 8080、scraper 副本间双向 TCP/UDP 7946、DNS，以及到 Event Hubs 的 TCP 5671 和到 Azure 身份、Monitor、Resource Manager 端点的 HTTPS 443。
 
