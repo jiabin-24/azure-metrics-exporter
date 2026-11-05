@@ -141,14 +141,10 @@ kubectl rollout restart -n $namespace deployment/azure-metrics-scraper
 kubectl rollout status -n $namespace deployment/azure-metrics-scraper
 ```
 
-修改 workspace 配置时，先重启 exporter 并等待更新完成，再重启 scraper，使其重新发现 workspace：
+修改 workspace 配置时，先重启 exporter 并等待更新完成，再重启 scraper，使其重新发现 workspace
 
-```powershell
-kubectl apply -n $namespace -k .\deploy\
+## 5. 开启 AKS 控制平面指标并配置拉取 job
 
-kubectl rollout restart -n $namespace deployment/azure-metrics-exporter
-kubectl rollout status -n $namespace deployment/azure-metrics-exporter
+如需采集 API Server、etcd、Scheduler 等控制平面指标，需先在 AKS 侧启用 Azure Monitor 托管 Prometheus 和控制平面指标采集，再配置导出器及 Prometheus 拉取 job；仅添加 job 不会自动开启 AKS 侧采集。
 
-kubectl rollout restart -n $namespace deployment/azure-metrics-scraper
-kubectl rollout status -n $namespace deployment/azure-metrics-scraper
-```
+具体开启步骤、指标白名单和 job 示例见 [AKS 高级控制平面指标](../PROMQL.md#aks-control-plane)。
