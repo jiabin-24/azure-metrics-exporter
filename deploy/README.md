@@ -68,6 +68,7 @@ Azure Monitor workspace <- exporter (azure-metrics:8080) <- scraper -> Azure Eve
 3. 部署前，将 [exporter 清单](metrics-exporter.yaml) 和 [scraper 清单](metrics-scraper.yaml) 中的 `image` 分别更新为 [构建镜像](#构建镜像) 章节发布的镜像地址，包含对应的版本标签。
 4. 若 Azure Monitor 存在入库延迟，调整 `rolling_range.delay`；抓取较慢时同时调整 `scrape_timeout` 和 exporter 的写超时，前者不得超过 `scrape_interval`。
 
+权限说明：
 - exporter 使用服务主体认证。该身份需要各 workspace 的 **Monitoring Data Reader** 权限；如需补充资源区域，还需对应资源的读取权限。
 - scraper 单独使用具有 **Send** 权限的 Event Hub SAS 连接字符串，其 namespace、hub 名必须与实际一致，且必须包含 `;EntityPath=<event_hub.name>`。
 
@@ -114,7 +115,7 @@ $connectionString = Read-Host "Event Hub SAS connection string" -AsSecureString
 Remove-Variable connectionString
 ```
 
-Event Hub 的连接字符串、namespace 和 name 统一保存在 `scraper-secrets` Secret 中，键名分别为 `AZURE_EVENTHUB_CONNECTION_STRING`、`AZURE_EVENTHUB_NAMESPACE` 和 `AZURE_EVENTHUB_NAME`，并以同名环境变量注入 scraper。更新已有部署时，需先在相同命名空间创建此 Secret，再应用新的 scraper 清单；更新 Secret 后需重启 scraper 才能生效。
+Event Hub 配置统一存于 `scraper-secrets`，以同名环境变量注入 scraper。部署前需在相同命名空间创建此 Secret，更新后需重启 scraper。
 
 使用 AKS 默认网络配置且未额外限制出站流量时，以下通信通常已连通，无需额外放行；如配置了 NetworkPolicy、NSG、防火墙或私有端点，则需确认允许 scraper 到 exporter 的 TCP 8080、scraper 副本间双向 TCP/UDP 7946、DNS，以及到 Event Hubs 的 TCP 5671 和到 Azure 身份、Monitor、Resource Manager 端点的 HTTPS 443。
 
