@@ -178,15 +178,6 @@ scrape_configs:
     static_configs:
       - targets: *exporter_targets
 
-  - job_name: up
-    metric_name: up
-    metrics_path: /probe/metrics/promql
-    params:
-      query: ['up{job=~"controlplane-.*"}']
-      format: ["json"]
-    static_configs:
-      - targets: *exporter_targets
-
   # /metrics 文本任务仅适用于未配置 event_hub 的独立采集器。
   # - job_name: exporter-self
   #   scrape_interval: 30s
